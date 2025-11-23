@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Log files (keep commented out - you might want to track these)
+# *.log
+# logs/
+
+# Media files (keep commented out - these shouldn't be in git anyway)
+# *.mkv
+# *.mp4
+# *.avi
+# *.mov
+# *.m4v
+# *.jpg
+# *.jpeg
+# *.png
+# *.nfo
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Test files
+test_*
+*_test.py
+
+# Configuration files with sensitive data
+config.ini
+secrets.json
+.env
+
+# Backup files
+*.orig
+*.rej 
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.staging
+
+# Secrets
+secrets.json
+
+# Build and Source Directories
+ffmpeg/
+ffmpeg-build/
+vmaf/
+vmaf-install/
+
+# Temporary and Output Directories
+logs/
+working/
+samples/
+results/
+failed/
+tagged/
+cleaned/
