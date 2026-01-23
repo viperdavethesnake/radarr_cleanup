@@ -101,3 +101,6 @@ results/
 failed/
 tagged/
 cleaned/
+
+# Local scratch / hold folder
+old/
