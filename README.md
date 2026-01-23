@@ -12,6 +12,10 @@ radarr_cleanup/
 │   ├── foreign_post_processor.py # Post-processing for foreign films
 │   ├── helpers/                # Helper scripts and utilities
 │   └── README.md               # Detailed documentation
+├── maintenance/                # Operational maintenance scripts for media libraries
+│   ├── fix_media_perms.py       # Strip ACLs + enforce david:media + consistent perms
+│   ├── orphaned_metadata_cleanup.py # Report-only: movie/doc folder completeness + leftovers
+│   └── codec_bitrate_report.py  # Read-only: codec/resolution/bitrate report (ffprobe/mediainfo)
 ├── tv_cleanup/                 # Tools for TV Show management
 │   ├── tv_batch_cleaner.py     # TV show metadata and cleaning
 │   ├── tv_mkv_remux_cleanroom.py # TV show remuxing
@@ -46,6 +50,45 @@ Tools for transcoding to AV1 format and quality benchmarking:
 - **Quality Analysis**: VMAF scoring and comparison
 - **Batch Processing**: Generate and run transcoding scripts
 
+### Maintenance (`maintenance/`)
+Operational scripts for keeping the Jellyfin libraries healthy.
+
+#### `fix_media_perms.py`
+- **What it does**: Strips ACLs first, then enforces ownership `david:media` and perms (dirs `2775`, files `664`) on:
+  - `/storage/media/movies`
+  - `/storage/media/documentaries`
+  - `/storage/media/music`
+  - `/storage/media/tvshows`
+- **Usage**:
+
+```bash
+./maintenance/fix_media_perms.py           # dry-run
+./maintenance/fix_media_perms.py --apply   # apply (auto-sudo)
+```
+
+#### `orphaned_metadata_cleanup.py` (movies + documentaries)
+- **What it does (report-only)**: Reports per-folder issues matching the movie pipeline contract:
+  - folders with video but missing `movie.nfo` and/or `poster.jpg`
+  - folders with `movie.nfo`/`poster.jpg` but no video in the same folder
+  - folders with intermediate leftovers (`metadata.json`, `tags.xml`) next to video
+- **Usage**:
+
+```bash
+./maintenance/orphaned_metadata_cleanup.py
+./maintenance/orphaned_metadata_cleanup.py --csv report.csv
+./maintenance/orphaned_metadata_cleanup.py --json report.json
+```
+
+#### `codec_bitrate_report.py`
+- **What it does (read-only)**: Generates a codec/resolution/bitrate report for media files (prefers `ffprobe`, falls back to `mediainfo`).
+- **Usage**:
+
+```bash
+./maintenance/codec_bitrate_report.py --limit 10
+./maintenance/codec_bitrate_report.py --csv media.csv
+./maintenance/codec_bitrate_report.py --json media.json
+```
+
 ## 🚀 Quick Start
 
 ### Movie Processing
@@ -71,6 +114,8 @@ cd movie_analyzer
 
 - Python 3.7+
 - FFmpeg with AV1 and VMAF support
+- `ffprobe` (typically via `ffmpeg`) or `mediainfo` (for `maintenance/codec_bitrate_report.py`)
+- `setfacl` (package `acl`) for `maintenance/fix_media_perms.py`
 - MKVToolNix (`mkvmerge`, `mkvpropedit`)
 - TMDB API key (for metadata)
 

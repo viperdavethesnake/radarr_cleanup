@@ -71,6 +71,14 @@ cd /storage/media/servarr
 python3 /home/david/git/radarr_cleanup/tv_cleanup/tv_mkv_remux_cleanroom.py
 ```
 
+### Python Dependencies
+These scripts use the repo's shared Python dependencies:
+
+```bash
+cd /home/david/git/radarr_cleanup
+python3 -m pip install -r requirements.txt
+```
+
 ## Enhanced Naming Convention
 
 ### Show Folders:

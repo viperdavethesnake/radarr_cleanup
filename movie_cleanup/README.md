@@ -111,14 +111,9 @@ mkvinfo --version
 
 ### Python Dependencies
 ```bash
-# No external Python packages required!
-# Uses only Python 3.13+ standard library with modern features
-python3 --version  # Ensure Python 3.13+
-
-# Benefits of Python 3.13:
-# - Improved error messages and debugging
-# - Better performance for concurrent operations
-# - Enhanced type hints and pattern matching
+# This pipeline uses a small set of Python packages.
+cd /home/david/git/radarr_cleanup
+python3 -m pip install -r requirements.txt
 ```
 
 ### Configuration

@@ -72,6 +72,14 @@ Advanced quality analysis and visualization:
 ls -la /storage/media/servarr/cleaned/
 ```
 
+### Python Dependencies
+These scripts use the repo's shared Python dependencies:
+
+```bash
+cd /home/david/git/radarr_cleanup
+python3 -m pip install -r requirements.txt
+```
+
 ### 2. Run Benchmark Analysis
 ```bash
 cd /home/david/git/radarr_cleanup/movie_analyzer
