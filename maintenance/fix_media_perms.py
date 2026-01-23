@@ -30,7 +30,8 @@ FILE_MODE = 0o0664
 @dataclass
 class Counters:
     roots: int = 0
-    acls_stripped: int = 0
+    acl_strip_planned: int = 0
+    acl_strip_executed: int = 0
     scanned_dirs: int = 0
     scanned_files: int = 0
     skipped_symlinks: int = 0
@@ -276,14 +277,20 @@ def main() -> None:
             if "setfacl not found" in err and args.apply:
                 raise SystemExit(err)
         else:
-            counters.acls_stripped += 1
+            if args.apply:
+                counters.acl_strip_executed += 1
+            else:
+                counters.acl_strip_planned += 1
 
         _walk_and_fix(root, uid, gid, args.apply, counters)
 
     print("\n" + "-" * 80)
     print("Summary:")
     print(f"  roots             : {counters.roots}")
-    print(f"  acls stripped     : {counters.acls_stripped}")
+    if args.apply:
+        print(f"  acl strip executed: {counters.acl_strip_executed}")
+    else:
+        print(f"  acl strip planned : {counters.acl_strip_planned}")
     print(f"  scanned dirs      : {counters.scanned_dirs}")
     print(f"  scanned files     : {counters.scanned_files}")
     print(f"  changed owner     : {counters.changed_owner}")
