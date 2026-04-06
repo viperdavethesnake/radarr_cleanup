@@ -2,7 +2,7 @@
 """
 🎬 Movie Verification Tool - Jellyfin Compatibility Checker
 
-A modern Python 3.13 tool for verifying movie collections are properly
+A modern Python 3.13+ tool for verifying movie collections are properly
 processed and ready for Jellyfin media server.
 
 Features:
@@ -27,7 +27,7 @@ from pathlib import Path
 import sys
 
 # ========== CONFIG =============
-DEFAULT_SCAN_DIR = '/storage/media/movies'
+DEFAULT_SCAN_DIR = os.getenv('RC_VERIFY_SCAN_DIR', '/storage/media/movies')
 LOG_DIR = './logs'
 MAX_WORKERS = 12
 
@@ -52,7 +52,7 @@ class Colors:
 
 @dataclass
 class VerificationResult:
-    """Modern data class for verification results using Python 3.13 features"""
+    """Modern data class for verification results."""
     folder: str
     path: str
     status: str

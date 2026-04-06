@@ -2,7 +2,7 @@
 
 **Author:** ViperDavetheSnake (microbarley@gmail.com)
 
-A sophisticated Python 3.13-based pipeline for processing and cleaning MKV files with comprehensive metadata extraction and optimal track selection. This project transforms raw downloaded movies into clean, Jellyfin-ready MKV files with proper metadata, optimal track selection, and file organization.
+A sophisticated Python 3.13+ pipeline for processing and cleaning MKV files with comprehensive metadata extraction and optimal track selection. This project transforms raw downloaded movies into clean, Jellyfin-ready MKV files with proper metadata, optimal track selection, and file organization.
 
 ## 🎯 Overview
 
@@ -114,6 +114,15 @@ mkvinfo --version
 # This pipeline uses a small set of Python packages.
 cd /home/david/git/radarr_cleanup
 python3 -m pip install -r requirements.txt
+```
+
+### Multi-server Path Overrides
+Use env vars when server paths differ:
+
+```bash
+export RC_VERIFY_SCAN_DIR="/storage/media/movies"
+export RC_FOREIGN_DIR="/storage/media/servarr/foreign"
+export RC_CLEANED_DIR="/storage/media/servarr/cleaned"
 ```
 
 ### Configuration

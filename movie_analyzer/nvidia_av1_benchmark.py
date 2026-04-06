@@ -15,16 +15,30 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
 import sys
 
-# Custom FFmpeg path with VMAF support
-FFMPEG_BIN = "/home/david/git/radarr_cleanup/ffmpeg-build/bin/ffmpeg"
-FFPROBE_BIN = "/home/david/git/radarr_cleanup/ffmpeg-build/bin/ffprobe"
-# Library path for custom FFmpeg
-CUSTOM_LD_PATH = "/home/david/git/radarr_cleanup/ffmpeg-build/lib:/home/david/git/radarr_cleanup/vmaf-install/lib/x86_64-linux-gnu"
+# Runtime config (override via env on each server)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+FFMPEG_PREFIX = Path(os.getenv("RC_FFMPEG_PREFIX", str(REPO_ROOT / "ffmpeg-build")))
+VMAF_LIB_DIR = Path(os.getenv("RC_VMAF_LIB_DIR", str(REPO_ROOT / "vmaf-install/lib/x86_64-linux-gnu")))
+
+
+def resolve_binary(explicit_env: str, fallback_path: Path, system_name: str) -> str:
+    override = os.getenv(explicit_env)
+    if override:
+        return override
+    if fallback_path.exists():
+        return str(fallback_path)
+    found = shutil.which(system_name)
+    return found if found else str(fallback_path)
+
+
+FFMPEG_BIN = resolve_binary("RC_FFMPEG_BIN", FFMPEG_PREFIX / "bin/ffmpeg", "ffmpeg")
+FFPROBE_BIN = resolve_binary("RC_FFPROBE_BIN", FFMPEG_PREFIX / "bin/ffprobe", "ffprobe")
+CUSTOM_LD_PATH = os.getenv("RC_LD_LIBRARY_PATH", f"{FFMPEG_PREFIX}/lib:{VMAF_LIB_DIR}")
 
 # Configuration
-WORK_DIR = Path("/space/media/working")          # Fast NVMe working space
-MOVIES_DIR = Path("/storage/media/servarr/cleaned")  # Source: cleaned movies ready for encoding
-OUTPUT_DIR = Path("/space/media/av1")            # Destination: final AV1 files
+WORK_DIR = Path(os.getenv("RC_WORK_DIR", "/space/media/working"))  # Fast NVMe working space
+MOVIES_DIR = Path(os.getenv("RC_MOVIES_DIR", "/storage/media/servarr/cleaned"))  # Source: cleaned movies
+OUTPUT_DIR = Path(os.getenv("RC_OUTPUT_DIR", "/space/media/av1"))  # Destination: final AV1 files
 RESULTS_DIR = Path("./results")                  # Local: benchmark results in repo
 SAMPLES_DIR = Path("./samples")                  # Local: test samples in repo
 
@@ -69,13 +83,19 @@ class NvidiaAV1Benchmark:
                                      '--format=csv,noheader,nounits'], 
                                     capture_output=True, text=True)
             
-            # FFmpeg version
-            ffmpeg_info = subprocess.run(['ffmpeg', '-version'], 
+            # FFmpeg version (same binary used by benchmark)
+            ffmpeg_info = subprocess.run([FFMPEG_BIN, '-version'],
                                        capture_output=True, text=True)
             
             return {
                 'gpu': gpu_info.stdout.strip() if gpu_info.returncode == 0 else 'Unknown',
                 'ffmpeg_version': ffmpeg_info.stdout.split('\n')[0] if ffmpeg_info.returncode == 0 else 'Unknown',
+                'ffmpeg_bin': FFMPEG_BIN,
+                'ffprobe_bin': FFPROBE_BIN,
+                'ld_library_path': CUSTOM_LD_PATH,
+                'movies_dir': str(MOVIES_DIR),
+                'work_dir': str(WORK_DIR),
+                'output_dir': str(OUTPUT_DIR),
                 'timestamp': datetime.now().isoformat()
             }
         except Exception as e:

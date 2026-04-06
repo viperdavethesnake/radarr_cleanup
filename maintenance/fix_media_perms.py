@@ -12,7 +12,7 @@ from shutil import which
 from typing import Iterable, List, Optional, Tuple
 
 
-BASE = "/storage/media"
+BASE = os.getenv("RC_MEDIA_BASE", "/storage/media")
 DEFAULT_TARGETS = [
     f"{BASE}/documentaries",
     f"{BASE}/movies",
@@ -21,8 +21,8 @@ DEFAULT_TARGETS = [
 ]
 DEFAULT_EXCLUDE_NAMES = {"working", "usenet", "servarr"}
 
-OWNER = "david"
-GROUP = "media"
+OWNER = os.getenv("RC_MEDIA_OWNER", "david")
+GROUP = os.getenv("RC_MEDIA_GROUP", "media")
 DIR_MODE = 0o2775
 FILE_MODE = 0o0664
 

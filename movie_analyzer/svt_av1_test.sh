@@ -1,5 +1,13 @@
 #!/bin/bash
-export LD_LIBRARY_PATH="/home/david/git/radarr_cleanup/ffmpeg-build/lib:/home/david/git/radarr_cleanup/vmaf-install/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FFMPEG_PREFIX="${RC_FFMPEG_PREFIX:-$REPO_ROOT/ffmpeg-build}"
+VMAF_LIB_DIR="${RC_VMAF_LIB_DIR:-$REPO_ROOT/vmaf-install/lib/x86_64-linux-gnu}"
+FFMPEG_BIN="${RC_FFMPEG_BIN:-$FFMPEG_PREFIX/bin/ffmpeg}"
+WORK_DIR="${RC_WORK_DIR:-/space/media/working}"
+
+export LD_LIBRARY_PATH="$FFMPEG_PREFIX/lib:$VMAF_LIB_DIR:$LD_LIBRARY_PATH"
+mkdir -p "$WORK_DIR/encoded"
 
 echo "=== SVT-AV1 vs NVENC AV1 COMPARISON TEST ==="
 echo "Testing same x264 samples with software SVT-AV1..."
@@ -25,12 +33,12 @@ for scene in high_motion low_motion complex; do
     source_mb=$((source_size / 1024 / 1024))
     
     for crf in $CRF_VALUES; do
-        output="/space/media/working/encoded/svt_av1_${scene}_crf${crf}.mkv"
+        output="$WORK_DIR/encoded/svt_av1_${scene}_crf${crf}.mkv"
         
         echo -n "  CRF${crf}: "
         start_time=$(date +%s.%N)
         
-        /home/david/git/radarr_cleanup/ffmpeg-build/bin/ffmpeg -y -i "$source" \
+        "$FFMPEG_BIN" -y -i "$source" \
             -c:v libsvtav1 -crf $crf -preset $PRESET \
             -c:a copy -c:s copy \
             "$output" &>/dev/null
@@ -44,7 +52,7 @@ for scene in high_motion low_motion complex; do
             compression=$(echo "scale=1; $source_mb / $output_mb" | bc -l)
             
             # Quick VMAF test
-            vmaf_score=$(/home/david/git/radarr_cleanup/ffmpeg-build/bin/ffmpeg -i "$source" -i "$output" -lavfi "[0:v][1:v]libvmaf=n_threads=4" -f null - 2>&1 | grep "VMAF score:" | tail -1 | sed 's/.*VMAF score: //' | sed 's/rate.*//')
+            vmaf_score=$("$FFMPEG_BIN" -i "$source" -i "$output" -lavfi "[0:v][1:v]libvmaf=n_threads=4" -f null - 2>&1 | grep "VMAF score:" | tail -1 | sed 's/.*VMAF score: //' | sed 's/rate.*//')
             
             printf "%dMB→%dMB (%sx), %.1fs, VMAF %.1f\n" $source_mb $output_mb $compression $encode_time $vmaf_score
         else

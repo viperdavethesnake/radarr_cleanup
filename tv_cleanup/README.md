@@ -2,6 +2,8 @@
 
 This directory contains scripts for cleaning and remuxing TV shows, similar to the movie cleanup scripts but adapted for TV show structure with seasons and episodes.
 
+Supported runtime: Python 3.13/3.14.
+
 ## Scripts
 
 ### `tv_batch_cleaner.py`

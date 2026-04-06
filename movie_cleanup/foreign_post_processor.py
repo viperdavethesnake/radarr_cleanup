@@ -3,7 +3,7 @@
 """
 🌍 Foreign Post Processor - Language Standardization Tool
 
-A modern Python 3.13 tool for processing foreign language movies with
+A modern Python 3.13+ tool for processing foreign language movies with
 IETF BCP 47 language code standardization and metadata validation.
 
 Features:
@@ -25,8 +25,8 @@ from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from pathlib import Path
 
-FOREIGN_DIR = "/storage/media/servarr/foreign"
-CLEANED_DIR = "/storage/media/servarr/cleaned"
+FOREIGN_DIR = os.getenv("RC_FOREIGN_DIR", "/storage/media/servarr/foreign")
+CLEANED_DIR = os.getenv("RC_CLEANED_DIR", "/storage/media/servarr/cleaned")
 LOG_DIR = './logs'
 MAX_WORKERS = 4
 

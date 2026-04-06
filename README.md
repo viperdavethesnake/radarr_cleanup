@@ -112,12 +112,22 @@ cd movie_analyzer
 
 ## 🔧 Requirements
 
-- Python 3.7+
+- Python 3.13 or 3.14
 - FFmpeg with AV1 and VMAF support
 - `ffprobe` (typically via `ffmpeg`) or `mediainfo` (for `maintenance/codec_bitrate_report.py`)
 - `setfacl` (package `acl`) for `maintenance/fix_media_perms.py`
 - MKVToolNix (`mkvmerge`, `mkvpropedit`)
 - TMDB API key (for metadata)
+- `numpy` and `matplotlib` (for `movie_analyzer/quality_analyzer.py`)
+
+## 🌐 Multi-server Configuration
+
+For Ubuntu 25/26 hosts with different mount layouts, use environment variables instead of editing scripts:
+
+- `RC_MEDIA_BASE`, `RC_MEDIA_OWNER`, `RC_MEDIA_GROUP` for `maintenance/fix_media_perms.py`
+- `RC_VERIFY_SCAN_DIR`, `RC_FOREIGN_DIR`, `RC_CLEANED_DIR` for movie cleanup tools
+- `RC_FFMPEG_PREFIX`, `RC_FFMPEG_BIN`, `RC_FFPROBE_BIN`, `RC_VMAF_LIB_DIR`, `RC_LD_LIBRARY_PATH`
+- `RC_MOVIES_DIR`, `RC_WORK_DIR`, `RC_OUTPUT_DIR` for analyzer paths
 
 ## 📝 Notes
 

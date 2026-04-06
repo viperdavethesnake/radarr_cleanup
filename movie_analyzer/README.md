@@ -29,6 +29,17 @@ GPU AV1 Pipeline:
   - `/space/media/working/` - Fast NVMe working space 
   - `/space/media/av1/` - Final AV1 output files
 
+### Multi-server Overrides (Ubuntu 25/26)
+Set these when paths or custom ffmpeg locations differ per host:
+
+```bash
+export RC_FFMPEG_PREFIX="/path/to/ffmpeg-build"
+export RC_VMAF_LIB_DIR="/path/to/vmaf/lib/x86_64-linux-gnu"
+export RC_MOVIES_DIR="/storage/media/servarr/cleaned"
+export RC_WORK_DIR="/space/media/working"
+export RC_OUTPUT_DIR="/space/media/av1"
+```
+
 ## 🎯 Hardware Requirements
 
 - **GPU**: Nvidia RTX 40/50 series with AV1 hardware encoding
