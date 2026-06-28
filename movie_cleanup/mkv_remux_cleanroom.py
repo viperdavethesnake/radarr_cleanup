@@ -375,7 +375,10 @@ def remux_folder(tagged_folder):
         cmd += [src_mkv]
 
         log(f"  [CMD] {' '.join(cmd)}")
-        run_mkvmerge(cmd, base, timeout=1800)
+        # 3600s: largest ~90 GB 4K remuxes run ~2600s at the measured ~34 MB/s
+        # floor under 4-way + co-resident Jellyfin load. 1800s was on the edge
+        # (60 GB files finished at 1798s). Matches the foreign path's timeout.
+        run_mkvmerge(cmd, base, timeout=3600)
 
         # Copy sidecars
         for fname in ['movie.nfo', 'poster.jpg', 'fanart.jpg']:
