@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+
+import os, shutil, subprocess, json, time, traceback, re, signal
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+TAGGED_DIR = './tagged_tv'
+CLEANED_DIR = './cleaned_tv'
+REVIEW_DIR = './review_tv'
+FAILED_DIR = './failed_tv'
+LOG_DIR = './logs'
+MAX_WORKERS = 4
+
+shutdown_requested = False
+
+
+def signal_handler(signum, frame):
+    global shutdown_requested
+    shutdown_requested = True
+    log("⚠️ Interrupt signal received, initiating graceful shutdown...")
+    import threading
+    def force_exit():
+        time.sleep(3)
+        log("⚠️ Force exiting due to multiple interrupts...")
+        os._exit(1)
+    threading.Thread(target=force_exit, daemon=True).start()
+
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+
+def log(msg):
+    timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
+    line = f"{timestamp} {msg}"
+    print(line)
+    with open(os.path.join(LOG_DIR, 'tv_remux_cleanroom_debug.log'), 'a') as f:
+        f.write(line + '\n')
+
+
+def mkv_identify(mkv_path):
+    result = subprocess.run(['mkvmerge', '-J', mkv_path],
+                            capture_output=True, text=True, check=True, timeout=30)
+    return json.loads(result.stdout)
+
+
+def is_eng_lang(lang):
+    if not lang or lang.lower() in ('', 'und', 'en', 'eng', 'en-us', 'en-gb'):
+        return True
+    return False
+
+
+def is_audio_junk(track):
+    props = track.get('properties') or {}
+    name_low = (props.get('track_name') or '').lower()
+    if 'commentary' in name_low or props.get('flag_commentary'):
+        return True
+    if 'description' in name_low or 'descriptive' in name_low or 'visually impaired' in name_low:
+        return True
+    return False
+
+
+def is_sub_junk(track):
+    props = track.get('properties') or {}
+    name_low = (props.get('track_name') or '').lower()
+    if (
+        'commentary' in name_low
+        or 'sdh' in name_low
+        or 'hearing' in name_low
+        or 'impaired' in name_low
+        or 'hi ' in name_low
+        or 'hi-' in name_low
+        or 'hi/' in name_low
+        or 'forced' in name_low
+        or props.get('flag_commentary')
+        or props.get('flag_hearing_impaired')
+        or props.get('forced_track')
+    ):
+        return True
+    return False
+
+
+def audio_codec_rank(codec_id):
+    # Lower is better. EAC3 > AC3 (modern preference).
+    c = (codec_id or '').upper()
+    if 'TRUEHD' in c: return 0
+    if 'DTS' in c and ('HD' in c or 'MA' in c): return 1
+    if 'DTS' in c: return 2
+    if 'EAC3' in c or 'E-AC-3' in c or 'EC-3' in c: return 3
+    if 'AC3' in c or 'AC-3' in c: return 4
+    if 'FLAC' in c: return 5
+    if 'AAC' in c: return 6
+    if 'MPEG/L3' in c or 'MP3' in c: return 7
+    return 99
+
+
+def codec_id_short(codec_id):
+    c = (codec_id or '').upper()
+    # Video
+    if 'HEVC' in c or 'H.265' in c: return 'hevc'
+    if 'AVC' in c or 'H.264' in c: return 'h264'
+    if 'V_AV1' in c or c == 'V_AV1': return 'av1'
+    if 'VP9' in c: return 'vp9'
+    if 'MPEG2' in c: return 'mpeg2'
+    # Audio (EAC3 check must precede AC3)
+    if 'TRUEHD' in c: return 'truehd'
+    if 'DTS' in c and ('HD' in c or 'MA' in c): return 'dtshd'
+    if 'DTS' in c: return 'dts'
+    if 'EAC3' in c or 'E-AC-3' in c or 'EC-3' in c: return 'eac3'
+    if 'AC3' in c or 'AC-3' in c: return 'ac3'
+    if 'FLAC' in c: return 'flac'
+    if 'AAC' in c: return 'aac'
+    if 'MPEG/L3' in c or 'MP3' in c: return 'mp3'
+    return 'unknown'
+
+
+def pick_best_audio(tracks):
+    audios = [t for t in tracks
+              if t['type'] == 'audio'
+              and is_eng_lang((t.get('properties') or {}).get('language'))
+              and not is_audio_junk(t)]
+    if not audios:
+        audios = [t for t in tracks if t['type'] == 'audio' and not is_audio_junk(t)]
+    if not audios:
+        return None
+    audios.sort(key=lambda t: audio_codec_rank((t.get('properties') or {}).get('codec_id')))
+    return audios[0]
+
+
+def pick_best_subtitle(tracks):
+    allowed = ['S_TEXT/UTF8', 'S_TEXT/ASS', 'S_TEXT/SSA']
+    valid = [t for t in tracks
+             if t['type'] == 'subtitles'
+             and is_eng_lang((t.get('properties') or {}).get('language'))
+             and (t.get('properties') or {}).get('codec_id') in allowed
+             and not is_sub_junk(t)]
+    if not valid:
+        return None
+    srt = [t for t in valid if (t.get('properties') or {}).get('codec_id') == 'S_TEXT/UTF8']
+    return srt[0] if srt else valid[0]
+
+
+def enhanced_episode_name(stem, video_track, audio_track, ext='.mkv'):
+    """stem: filename without extension, e.g. 'Show_S01E01_Title'."""
+    v_props = (video_track or {}).get('properties') or {}
+    a_props = (audio_track or {}).get('properties') or {}
+
+    dims = v_props.get('pixel_dimensions') or ''
+    height = dims.split('x')[-1] if 'x' in dims else 'unknown'
+
+    v_codec = codec_id_short(v_props.get('codec_id'))
+    a_codec = codec_id_short(a_props.get('codec_id'))
+
+    return f"{stem}_[{height}p_{v_codec}_{a_codec}]{ext}"
+
+
+def _move_to_failed(folder, base):
+    failed = os.path.join(FAILED_DIR, base)
+    try:
+        if os.path.exists(failed):
+            shutil.rmtree(failed, ignore_errors=True)
+        shutil.move(folder, failed)
+        log(f"  [FAILED] Moved to failed directory: {failed}")
+    except Exception as e:
+        log(f"❌ Could not move to failed: {e}")
+
+
+def _move_episode_to_review(src_mkv, show_base, season_dir):
+    fname = os.path.basename(src_mkv)
+    review_dir = os.path.join(REVIEW_DIR, show_base, season_dir)
+    review_target = os.path.join(review_dir, fname)
+    try:
+        os.makedirs(review_dir, exist_ok=True)
+        if os.path.exists(review_target):
+            log(f"  [REVIEW] Target exists: {review_target} — leaving source in place")
+            return
+        shutil.move(src_mkv, review_target)
+        sib_nfo = os.path.splitext(src_mkv)[0] + '.nfo'
+        if os.path.isfile(sib_nfo):
+            shutil.move(sib_nfo, os.path.splitext(review_target)[0] + '.nfo')
+        log(f"  [REVIEW] Moved to: {review_target}")
+    except Exception as e:
+        log(f"❌ Could not move to review: {e}")
+
+
+def _episode_dst_name(src_mkv, tracks):
+    """Compute the with-codec-suffix output filename for a given source MKV."""
+    stem, _ = os.path.splitext(os.path.basename(src_mkv))
+    video_tracks = [t for t in tracks if t['type'] == 'video']
+    if not video_tracks:
+        return stem + '.mkv'
+    audio = pick_best_audio(tracks)
+    return enhanced_episode_name(stem, video_tracks[0], audio, '.mkv')
+
+
+def remux_episode(job):
+    """job: dict with src_mkv, dst_dir, show_base, season_dir, tagged_folder."""
+    if shutdown_requested:
+        return ('skipped', job, 'shutdown')
+
+    src_mkv = job['src_mkv']
+    dst_dir = job['dst_dir']
+    show_base = job['show_base']
+    season_dir = job['season_dir']
+    fname = os.path.basename(src_mkv)
+    stem, _ = os.path.splitext(fname)
+    t0 = time.perf_counter()
+    log(f"  ▶ Remuxing: {show_base}/{season_dir}/{fname}")
+
+    try:
+        info = mkv_identify(src_mkv)
+        tracks = info.get('tracks') or []
+        if not tracks:
+            raise Exception("No tracks in MKV")
+
+        video_tracks = [t for t in tracks if t['type'] == 'video']
+        if len(video_tracks) > 1:
+            log(f"  [REVIEW] {len(video_tracks)} video tracks in {fname} — needs human review")
+            _move_episode_to_review(src_mkv, show_base, season_dir)
+            return ('review', job, None)
+        if not video_tracks:
+            raise Exception("No video tracks")
+
+        video = video_tracks[0]
+        audio = pick_best_audio(tracks)
+        subtitle = pick_best_subtitle(tracks)
+
+        dst_name = enhanced_episode_name(stem, video, audio, '.mkv')
+        dst_mkv = os.path.join(dst_dir, dst_name)
+
+        # Resume support: skip if a non-empty output already exists
+        if os.path.isfile(dst_mkv) and os.path.getsize(dst_mkv) > 0:
+            log(f"    [SKIP] Output exists: {dst_name}")
+            sib_nfo = os.path.splitext(src_mkv)[0] + '.nfo'
+            dst_nfo = os.path.splitext(dst_mkv)[0] + '.nfo'
+            if os.path.isfile(sib_nfo) and not os.path.isfile(dst_nfo):
+                shutil.copy2(sib_nfo, dst_nfo)
+            return ('ok', job, None)
+
+        os.makedirs(dst_dir, exist_ok=True)
+        log(f"    [NAME] {dst_name}")
+
+        video_id = str(video['id'])
+        audio_id = str(audio['id']) if audio else None
+        subtitle_id = str(subtitle['id']) if subtitle else None
+
+        cmd = ['mkvmerge', '-o', dst_mkv, '--no-chapters', '--no-attachments',
+               '--video-tracks', video_id]
+        if audio_id is not None:
+            cmd += ['--audio-tracks', audio_id, '--language', f'{audio_id}:eng']
+        if subtitle_id is not None:
+            cmd += ['--subtitle-tracks', subtitle_id,
+                    '--language', f'{subtitle_id}:eng',
+                    '--default-track-flag', f'{subtitle_id}:0']
+        else:
+            cmd += ['--no-subtitles']
+        cmd += [src_mkv]
+
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1800)
+
+        sib_nfo = os.path.splitext(src_mkv)[0] + '.nfo'
+        if os.path.isfile(sib_nfo):
+            dst_nfo = os.path.splitext(dst_mkv)[0] + '.nfo'
+            shutil.copy2(sib_nfo, dst_nfo)
+
+        log(f"    ✔ [DONE] {fname} in {time.perf_counter()-t0:.2f}s")
+        return ('ok', job, None)
+
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or '').strip()[:500]
+        log(f"    ❌ mkvmerge failed on {fname}: {stderr}")
+        return ('failed', job, stderr)
+    except Exception as e:
+        log(f"    ❌ ERROR on {fname}: {e}")
+        return ('failed', job, str(e))
+
+
+def collect_jobs(tagged_folder):
+    """Return list of episode jobs for a single show folder."""
+    base = os.path.basename(tagged_folder)
+    dst_show = os.path.join(CLEANED_DIR, base)
+    jobs = []
+    for entry in sorted(os.listdir(tagged_folder)):
+        entry_path = os.path.join(tagged_folder, entry)
+        if not os.path.isdir(entry_path):
+            continue
+        for f in sorted(os.listdir(entry_path)):
+            if f.lower().endswith('.mkv'):
+                jobs.append({
+                    'src_mkv': os.path.join(entry_path, f),
+                    'dst_dir': os.path.join(dst_show, entry),
+                    'show_base': base,
+                    'season_dir': entry,
+                    'tagged_folder': tagged_folder,
+                })
+    return jobs
+
+
+def finalize_show(tagged_folder, ok_count, total):
+    base = os.path.basename(tagged_folder)
+    dst_show = os.path.join(CLEANED_DIR, base)
+    if not os.path.isdir(dst_show):
+        log(f"  [FINALIZE] {base}: no output dir, skipping")
+        return
+
+    for fname in ['tvshow.nfo', 'poster.jpg', 'fanart.jpg']:
+        src_file = os.path.join(tagged_folder, fname)
+        if os.path.isfile(src_file):
+            shutil.copy2(src_file, os.path.join(dst_show, fname))
+
+    log(f"✔ [SHOW DONE] {base}: {ok_count}/{total} episodes")
+    if ok_count == total:
+        try:
+            shutil.rmtree(tagged_folder)
+            log(f"  [CLEANUP] Removed source: {tagged_folder}")
+        except Exception as e:
+            log(f"❌ [CLEANUP] Failed to delete tagged folder: {e}")
+    else:
+        log(f"  [CLEANUP] Skipping deletion: {ok_count}/{total} succeeded")
+
+
+def main():
+    global shutdown_requested
+
+    for d in (LOG_DIR, CLEANED_DIR, REVIEW_DIR, FAILED_DIR):
+        os.makedirs(d, exist_ok=True)
+
+    folders = [os.path.join(TAGGED_DIR, d) for d in os.listdir(TAGGED_DIR)
+               if os.path.isdir(os.path.join(TAGGED_DIR, d)) and not d.startswith('.')]
+
+    all_jobs = []
+    show_totals = {}
+    for tf in folders:
+        jobs = collect_jobs(tf)
+        show_totals[tf] = len(jobs)
+        all_jobs.extend(jobs)
+
+    log(f"▶ Starting cleanroom remux: {len(folders)} shows, "
+        f"{len(all_jobs)} episodes, max {MAX_WORKERS} concurrent")
+
+    show_ok_counts = defaultdict(int)
+    aborted = False
+    if all_jobs:
+        try:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                futures = [pool.submit(remux_episode, job) for job in all_jobs]
+                completed = 0
+                try:
+                    for fut in as_completed(futures):
+                        completed += 1
+                        if shutdown_requested:
+                            log("⚠️ Shutdown requested, cancelling remaining tasks...")
+                            for f in futures:
+                                f.cancel()
+                            pool.shutdown(wait=False)
+                            aborted = True
+                            break
+                        try:
+                            status, job, _err = fut.result(timeout=3600)
+                            if status == 'ok':
+                                show_ok_counts[job['tagged_folder']] += 1
+                            log(f"📊 Progress: {completed}/{len(futures)} episodes")
+                        except Exception as e:
+                            log(f"❌ Worker thread error: {e}")
+                            log(f"❌ Worker thread traceback: {traceback.format_exc()}")
+                except KeyboardInterrupt:
+                    log("⚠️ Received interrupt signal, shutting down gracefully...")
+                    shutdown_requested = True
+                    for f in futures:
+                        f.cancel()
+                    pool.shutdown(wait=False)
+                    aborted = True
+        except KeyboardInterrupt:
+            log("⚠️ Received interrupt signal during startup, exiting...")
+            return
+
+    # Per-show finalize: copy sidecars, delete tagged source if all eps succeeded
+    if not aborted:
+        for tf in folders:
+            finalize_show(tf, show_ok_counts.get(tf, 0), show_totals.get(tf, 0))
+
+    log("✅ All TV remux operations completed.")
+
+
+if __name__ == "__main__":
+    main()

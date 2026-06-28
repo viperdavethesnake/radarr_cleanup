@@ -1,0 +1,594 @@
+#!/usr/bin/env python3
+
+import os, sys, shutil, subprocess, json, time, traceback, re, signal
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from batch_cleaner import (
+    find_imdbid, fetch_tmdb_metadata,
+    write_json, write_tags_xml, write_nfo,
+    download_image, _delete_junk_nfos,
+)
+
+TAGGED_DIR = './tagged'
+FOREIGN_DIR = './foreign'
+CLEANED_DIR = './cleaned'
+REVIEW_DIR = './review'
+FAILED_DIR = './failed'
+LOG_DIR = './logs'
+MAX_WORKERS = 4
+
+# ISO 639-1 → 639-2/B (TMDB returns 639-1; MKV/Matroska tracks use 639-2/B).
+ISO_1_TO_2 = {
+    'it': 'ita', 'de': 'ger', 'fr': 'fre', 'es': 'spa', 'ja': 'jpn',
+    'ko': 'kor', 'zh': 'chi', 'pt': 'por', 'ru': 'rus', 'nl': 'dut',
+    'sv': 'swe', 'no': 'nor', 'da': 'dan', 'fi': 'fin', 'pl': 'pol',
+    'tr': 'tur', 'ar': 'ara', 'hi': 'hin', 'th': 'tha', 'el': 'gre',
+    'he': 'heb', 'cs': 'cze', 'hu': 'hun', 'ro': 'rum', 'uk': 'ukr',
+    'vi': 'vie', 'id': 'ind', 'ms': 'may', 'en': 'eng',
+}
+
+shutdown_requested = False
+
+def signal_handler(signum, frame):
+    global shutdown_requested
+    shutdown_requested = True
+    log("⚠️ Interrupt signal received, initiating graceful shutdown...")
+    import threading
+    def force_exit():
+        time.sleep(3)
+        log("⚠️ Force exiting due to multiple interrupts...")
+        os._exit(1)
+    threading.Thread(target=force_exit, daemon=True).start()
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+def log(msg):
+    timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
+    line = f"{timestamp} {msg}"
+    print(line)
+    with open(os.path.join(LOG_DIR, 'remux_cleanroom_debug.log'), 'a') as f:
+        f.write(line + '\n')
+
+def mkv_identify(mkv_path):
+    result = subprocess.run(['mkvmerge', '-J', mkv_path],
+                            capture_output=True, text=True, check=True, timeout=30)
+    return json.loads(result.stdout)
+
+def run_mkvmerge(cmd, base, timeout):
+    # mkvmerge exit codes: 0 = success, 1 = warnings (output still written),
+    # 2 = fatal error. mkvmerge writes its diagnostics to stdout, not stderr.
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode == 1:
+        warn = (result.stdout or '').strip()[:500]
+        log(f"⚠ mkvmerge warnings on {base} (output kept): {warn}")
+    elif result.returncode >= 2:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, output=result.stdout, stderr=result.stderr)
+
+def is_eng_lang(lang):
+    if not lang or lang.lower() in ('', 'und', 'en', 'eng', 'en-us', 'en-gb'):
+        return True
+    return False
+
+def is_audio_junk(track):
+    props = track.get('properties') or {}
+    name_low = (props.get('track_name') or '').lower()
+    if 'commentary' in name_low or props.get('flag_commentary'):
+        return True
+    if 'description' in name_low or 'descriptive' in name_low or 'visually impaired' in name_low:
+        return True
+    return False
+
+def is_sub_junk(track):
+    props = track.get('properties') or {}
+    name_low = (props.get('track_name') or '').lower()
+    if (
+        'commentary' in name_low
+        or 'sdh' in name_low
+        or 'hearing' in name_low
+        or 'impaired' in name_low
+        or 'hi ' in name_low
+        or 'hi-' in name_low
+        or 'hi/' in name_low
+        or 'forced' in name_low
+        or props.get('flag_commentary')
+        or props.get('flag_hearing_impaired')
+        or props.get('forced_track')
+    ):
+        return True
+    return False
+
+def audio_codec_rank(codec_id):
+    # Lower is better. EAC3 > AC3 (modern preference).
+    c = (codec_id or '').upper()
+    if 'TRUEHD' in c: return 0
+    if 'DTS' in c and ('HD' in c or 'MA' in c): return 1
+    if 'DTS' in c: return 2
+    if 'EAC3' in c or 'E-AC-3' in c or 'EC-3' in c: return 3
+    if 'AC3' in c or 'AC-3' in c: return 4
+    if 'FLAC' in c: return 5
+    if 'AAC' in c: return 6
+    if 'MPEG/L3' in c or 'MP3' in c: return 7
+    return 99
+
+def track_codec_short(track):
+    # mkvmerge -J fills `properties.codec_id` for Matroska sources only; for
+    # MP4 it leaves codec_id=None and exposes a human-readable `codec` field
+    # at the track top level. Fall through to that so foreign MP4 sources
+    # still produce a sensible codec slug in the output filename.
+    p = track.get('properties') or {}
+    cid = p.get('codec_id')
+    if cid:
+        return codec_id_short(cid)
+    return codec_id_short(track.get('codec') or '')
+
+def codec_id_short(codec_id):
+    c = (codec_id or '').upper()
+    # Video
+    if 'HEVC' in c or 'H.265' in c: return 'hevc'
+    if 'AVC' in c or 'H.264' in c: return 'h264'
+    if 'V_AV1' in c or c == 'V_AV1': return 'av1'
+    if 'VP9' in c: return 'vp9'
+    if 'MPEG2' in c: return 'mpeg2'
+    # Audio (EAC3 check must precede AC3)
+    if 'TRUEHD' in c: return 'truehd'
+    if 'DTS' in c and ('HD' in c or 'MA' in c): return 'dtshd'
+    if 'DTS' in c: return 'dts'
+    if 'EAC3' in c or 'E-AC-3' in c or 'EC-3' in c: return 'eac3'
+    if 'AC3' in c or 'AC-3' in c: return 'ac3'
+    if 'FLAC' in c: return 'flac'
+    if 'AAC' in c: return 'aac'
+    if 'MPEG/L3' in c or 'MP3' in c: return 'mp3'
+    return 'unknown'
+
+def pick_best_audio(tracks):
+    # Prefer English, non-junk; fall back to any non-junk.
+    audios = [t for t in tracks
+              if t['type'] == 'audio'
+              and is_eng_lang((t.get('properties') or {}).get('language'))
+              and not is_audio_junk(t)]
+    if not audios:
+        audios = [t for t in tracks if t['type'] == 'audio' and not is_audio_junk(t)]
+    if not audios:
+        return None
+    audios.sort(key=lambda t: audio_codec_rank((t.get('properties') or {}).get('codec_id')))
+    return audios[0]
+
+def pick_best_subtitle(tracks):
+    allowed = ['S_TEXT/UTF8', 'S_TEXT/ASS', 'S_TEXT/SSA']
+    valid = [t for t in tracks
+             if t['type'] == 'subtitles'
+             and is_eng_lang((t.get('properties') or {}).get('language'))
+             and (t.get('properties') or {}).get('codec_id') in allowed
+             and not is_sub_junk(t)]
+    if not valid:
+        return None
+    srt = [t for t in valid if (t.get('properties') or {}).get('codec_id') == 'S_TEXT/UTF8']
+    return srt[0] if srt else valid[0]
+
+def _normalize_title_for_path(title):
+    safe = re.sub(r'[\\/:*?"<>|]', '', title)
+    safe = safe.replace(' ', '_').replace('.', '').strip()
+    safe = re.sub(r'_+', '_', safe).strip('_')
+    return safe
+
+def enhanced_file_name(meta, video_track, audio_track, ext='.mkv'):
+    title = meta.get('title', 'Unknown')
+    year = meta.get('release_date', '')[:4]
+    safe_title = _normalize_title_for_path(title)
+
+    v_props = (video_track or {}).get('properties') or {}
+
+    dims = v_props.get('pixel_dimensions') or ''
+    height = dims.split('x')[-1] if 'x' in dims else 'unknown'
+
+    v_codec = track_codec_short(video_track or {})
+    a_codec = track_codec_short(audio_track or {})
+
+    if year:
+        return f"{safe_title}_({year})_[{height}p_{v_codec}_{a_codec}]{ext}"
+    return f"{safe_title}_[{height}p_{v_codec}_{a_codec}]{ext}"
+
+def is_sub_junk_foreign(track):
+    # Like is_sub_junk but ignores the source forced_track flag — foreign
+    # releases routinely tag the *only* English sub as forced (e.g. Cinema Paradiso),
+    # and we want to keep it. Name-based forced/SDH/commentary filters still apply.
+    props = track.get('properties') or {}
+    name_low = (props.get('track_name') or '').lower()
+    if (
+        'commentary' in name_low
+        or 'sdh' in name_low
+        or 'hearing' in name_low
+        or 'impaired' in name_low
+        or 'hi ' in name_low
+        or 'hi-' in name_low
+        or 'hi/' in name_low
+        or 'forced' in name_low
+        or props.get('flag_commentary')
+        or props.get('flag_hearing_impaired')
+    ):
+        return True
+    return False
+
+def pick_best_audio_for_lang(tracks, iso1_lang):
+    targets = {iso1_lang.lower(), ISO_1_TO_2.get(iso1_lang.lower(), iso1_lang.lower())}
+    audios = [t for t in tracks
+              if t['type'] == 'audio'
+              and ((t.get('properties') or {}).get('language') or '').lower() in targets
+              and not is_audio_junk(t)]
+    if not audios:
+        audios = [t for t in tracks if t['type'] == 'audio' and not is_audio_junk(t)]
+    if not audios:
+        return None
+    audios.sort(key=lambda t: audio_codec_rank((t.get('properties') or {}).get('codec_id')))
+    return audios[0]
+
+def _is_text_sub(track):
+    p = track.get('properties') or {}
+    cid = p.get('codec_id')
+    if cid in ('S_TEXT/UTF8', 'S_TEXT/ASS', 'S_TEXT/SSA'):
+        return True
+    # MP4 mov_text shows up as "Timed Text" in mkvmerge's top-level `codec` field.
+    return (track.get('codec') or '') == 'Timed Text'
+
+def _is_pgs_sub(track):
+    p = track.get('properties') or {}
+    if p.get('codec_id') == 'S_HDMV/PGS':
+        return True
+    return 'PGS' in (track.get('codec') or '')
+
+def _is_strict_eng(lang):
+    # Stricter than is_eng_lang — does NOT match None/'und'/empty. In a
+    # foreign source, an untagged sub is almost certainly not English.
+    return (lang or '').lower() in ('en', 'eng', 'en-us', 'en-gb')
+
+def pick_best_eng_sub_text_or_pgs(tracks):
+    text = [t for t in tracks
+            if t['type'] == 'subtitles'
+            and _is_strict_eng((t.get('properties') or {}).get('language'))
+            and _is_text_sub(t)
+            and not is_sub_junk_foreign(t)]
+    if text:
+        srt = [t for t in text if (t.get('properties') or {}).get('codec_id') == 'S_TEXT/UTF8']
+        return srt[0] if srt else text[0]
+    pgs = [t for t in tracks
+           if t['type'] == 'subtitles'
+           and _is_strict_eng((t.get('properties') or {}).get('language'))
+           and _is_pgs_sub(t)
+           and not is_sub_junk_foreign(t)]
+    return pgs[0] if pgs else None
+
+def _ensure_foreign_sidecars(foreign_folder, video_filename):
+    # Folders staged by batch_cleaner have full sidecars. Folders dropped in
+    # manually may have only Radarr's movie.nfo — regenerate from TMDB.
+    if os.path.exists(os.path.join(foreign_folder, 'metadata.json')):
+        return True
+    imdbid = find_imdbid(foreign_folder, video_filename)
+    if not imdbid:
+        log(f"  [SKIP] No IMDb ID for {os.path.basename(foreign_folder)}")
+        return False
+    log(f"  [TMDB] Fetching missing sidecars ({imdbid})")
+    meta, poster_url, fanart_url = fetch_tmdb_metadata(imdbid)
+    write_json(meta, os.path.join(foreign_folder, "metadata.json"))
+    write_tags_xml(meta, imdbid, os.path.join(foreign_folder, "tags.xml"))
+    write_nfo(meta, imdbid, os.path.join(foreign_folder, "movie.nfo"))
+    download_image(poster_url, os.path.join(foreign_folder, "poster.jpg"))
+    download_image(fanart_url, os.path.join(foreign_folder, "fanart.jpg"))
+    _delete_junk_nfos(foreign_folder)
+    return True
+
+def _move_to_failed(folder, base):
+    failed = os.path.join(FAILED_DIR, base)
+    try:
+        if os.path.exists(failed):
+            shutil.rmtree(failed, ignore_errors=True)
+        shutil.move(folder, failed)
+        log(f"  [FAILED] Moved to failed directory: {failed}")
+    except Exception as e:
+        log(f"❌ Could not move to failed: {e}")
+
+def _move_to_review(folder, base):
+    review = os.path.join(REVIEW_DIR, base)
+    try:
+        if os.path.exists(review):
+            log(f"  [REVIEW] Target already exists: {review} — leaving source in place")
+            return
+        shutil.move(folder, review)
+        log(f"  [REVIEW] Moved to review directory: {review}")
+    except Exception as e:
+        log(f"❌ Could not move to review: {e}")
+
+def remux_folder(tagged_folder):
+    global shutdown_requested
+    if shutdown_requested:
+        return
+
+    base = os.path.basename(tagged_folder)
+    log(f"\n▶ Remuxing: {base}")
+    dst_folder = None
+    try:
+        t0 = time.perf_counter()
+
+        mkvs = [f for f in os.listdir(tagged_folder) if f.lower().endswith('.mkv')]
+        if not mkvs:
+            raise Exception(f"No MKV file found in {tagged_folder}")
+        if len(mkvs) > 1:
+            log(f"[REVIEW] {len(mkvs)} MKVs in {base} — needs human review")
+            _move_to_review(tagged_folder, base)
+            return
+
+        mkv_file = mkvs[0]
+        src_mkv = os.path.join(tagged_folder, mkv_file)
+
+        info = mkv_identify(src_mkv)
+        tracks = info.get('tracks') or []
+        if not tracks:
+            raise Exception("No tracks found in MKV")
+
+        video_tracks = [t for t in tracks if t['type'] == 'video']
+        if len(video_tracks) > 1:
+            log(f"[REVIEW] {len(video_tracks)} video tracks in {base} — needs human review")
+            _move_to_review(tagged_folder, base)
+            return
+        if not video_tracks:
+            raise Exception("No video tracks in MKV")
+
+        video = video_tracks[0]
+        audio = pick_best_audio(tracks)
+        subtitle = pick_best_subtitle(tracks)
+
+        # Read metadata.json (written by batch_cleaner) for the enhanced filename
+        meta = {}
+        metadata_file = os.path.join(tagged_folder, "metadata.json")
+        if os.path.exists(metadata_file):
+            try:
+                with open(metadata_file, 'r') as f:
+                    meta = json.load(f)
+            except Exception as e:
+                log(f"  [WARN] Could not read metadata.json: {e}")
+
+        dst_folder = os.path.join(CLEANED_DIR, base)
+        os.makedirs(dst_folder, exist_ok=True)
+        if meta:
+            dst_mkv_name = enhanced_file_name(meta, video, audio, '.mkv')
+        else:
+            dst_mkv_name = mkv_file
+        dst_mkv = os.path.join(dst_folder, dst_mkv_name)
+        log(f"  [NAME] Output: {dst_mkv_name}")
+
+        video_id = str(video['id'])
+        audio_id = str(audio['id']) if audio else None
+        subtitle_id = str(subtitle['id']) if subtitle else None
+
+        cmd = ['mkvmerge', '-o', dst_mkv, '--no-chapters', '--no-attachments',
+               '--video-tracks', video_id]
+        if audio_id is not None:
+            cmd += ['--audio-tracks', audio_id, '--language', f'{audio_id}:eng']
+        if subtitle_id is not None:
+            cmd += ['--subtitle-tracks', subtitle_id,
+                    '--language', f'{subtitle_id}:eng',
+                    '--default-track-flag', f'{subtitle_id}:0']
+        else:
+            cmd += ['--no-subtitles']
+        cmd += [src_mkv]
+
+        log(f"  [CMD] {' '.join(cmd)}")
+        run_mkvmerge(cmd, base, timeout=1800)
+
+        # Copy sidecars
+        for fname in ['movie.nfo', 'poster.jpg', 'fanart.jpg']:
+            src_file = os.path.join(tagged_folder, fname)
+            if os.path.isfile(src_file):
+                shutil.copy2(src_file, os.path.join(dst_folder, fname))
+
+        log(f"✔ [DONE] Remuxed {base} in {time.perf_counter()-t0:.2f}s")
+
+        # Delete the tagged source after successful remux
+        try:
+            shutil.rmtree(tagged_folder)
+        except Exception as cleanup_error:
+            log(f"❌ [CLEANUP] Failed to delete tagged folder: {cleanup_error}")
+            log(f"  [CLEANUP] Remux successful but manual cleanup needed for: {tagged_folder}")
+
+    except subprocess.CalledProcessError as e:
+        detail = ((e.output or '') + (e.stderr or '')).strip()[:500]
+        log(f"❌ mkvmerge failed on {base}: {detail}")
+        if dst_folder and os.path.isdir(dst_folder):
+            shutil.rmtree(dst_folder, ignore_errors=True)
+        if os.path.isdir(tagged_folder):
+            _move_to_failed(tagged_folder, base)
+    except Exception as e:
+        log(f"❌ ERROR on {base}: {e}\n{traceback.format_exc()}")
+        if dst_folder and os.path.isdir(dst_folder):
+            shutil.rmtree(dst_folder, ignore_errors=True)
+        if os.path.isdir(tagged_folder):
+            _move_to_failed(tagged_folder, base)
+
+def remux_foreign_folder(foreign_folder):
+    # Track-selection rules for foreign-original films:
+    #   - audio: pick the original-language track (per metadata.json), best codec, non-junk
+    #   - subtitle: prefer eng text (SRT > ASS > SSA); fall back to eng PGS image subs
+    #   - default-on for the eng sub (foreign films want subs autoloaded under English audio)
+    #   - ignore source forced_track flag for sub junk filter — see is_sub_junk_foreign
+    # After remux, inject tags from sidecar tags.xml (batch_cleaner's foreign route does
+    # NOT inject tags into the MKV — the english route does, so this step bridges the gap).
+    global shutdown_requested
+    if shutdown_requested:
+        return
+
+    base = os.path.basename(foreign_folder)
+    log(f"\n🌍 Foreign remux: {base}")
+    dst_folder = None
+    try:
+        t0 = time.perf_counter()
+
+        videos = [f for f in os.listdir(foreign_folder)
+                  if f.lower().endswith(('.mkv', '.mp4'))]
+        if not videos:
+            log(f"❌ [SKIP] No video in {base}")
+            _move_to_failed(foreign_folder, base)
+            return
+        if len(videos) > 1:
+            log(f"[REVIEW] {len(videos)} videos in {base} — needs human review")
+            _move_to_review(foreign_folder, base)
+            return
+        src_video = os.path.join(foreign_folder, videos[0])
+
+        if not _ensure_foreign_sidecars(foreign_folder, videos[0]):
+            _move_to_failed(foreign_folder, base)
+            return
+
+        with open(os.path.join(foreign_folder, "metadata.json"), 'r') as f:
+            meta = json.load(f)
+
+        orig_lang = (meta.get('original_language') or '').strip()
+        if not orig_lang:
+            log(f"❌ [SKIP] metadata.json has no original_language for {base}")
+            _move_to_failed(foreign_folder, base)
+            return
+
+        info = mkv_identify(src_video)
+        tracks = info.get('tracks') or []
+        if not tracks:
+            raise Exception("No tracks in source")
+
+        video_tracks = [t for t in tracks if t['type'] == 'video']
+        if len(video_tracks) > 1:
+            log(f"[REVIEW] {len(video_tracks)} video tracks in {base}")
+            _move_to_review(foreign_folder, base)
+            return
+        if not video_tracks:
+            raise Exception("No video tracks")
+        video = video_tracks[0]
+
+        audio = pick_best_audio_for_lang(tracks, orig_lang)
+        if not audio:
+            log(f"❌ [SKIP] No usable audio in {base}")
+            _move_to_failed(foreign_folder, base)
+            return
+        subtitle = pick_best_eng_sub_text_or_pgs(tracks)
+
+        dst_folder = os.path.join(CLEANED_DIR, base)
+        os.makedirs(dst_folder, exist_ok=True)
+        dst_mkv_name = enhanced_file_name(meta, video, audio, '.mkv')
+        dst_mkv = os.path.join(dst_folder, dst_mkv_name)
+        log(f"  [NAME] Output: {dst_mkv_name}")
+
+        video_id = str(video['id'])
+        audio_id = str(audio['id'])
+        audio_lang = ((audio.get('properties') or {}).get('language')
+                      or ISO_1_TO_2.get(orig_lang.lower(), 'und'))
+
+        cmd = ['mkvmerge', '-o', dst_mkv, '--no-chapters', '--no-attachments',
+               '--video-tracks', video_id, '--track-name', f'{video_id}:',
+               '--audio-tracks', audio_id,
+               '--language', f'{audio_id}:{audio_lang}',
+               '--default-track-flag', f'{audio_id}:1',
+               '--track-name', f'{audio_id}:']
+        if subtitle is not None:
+            sub_id = str(subtitle['id'])
+            cmd += ['--subtitle-tracks', sub_id,
+                    '--language', f'{sub_id}:eng',
+                    '--default-track-flag', f'{sub_id}:1',
+                    '--forced-display-flag', f'{sub_id}:0',
+                    '--track-name', f'{sub_id}:']
+        else:
+            log("  [WARN] No English subtitle found; output will have none")
+            cmd += ['--no-subtitles']
+        cmd += [src_video]
+
+        log(f"  [CMD] {' '.join(cmd)}")
+        run_mkvmerge(cmd, base, timeout=3600)
+
+        tags_path = os.path.join(foreign_folder, 'tags.xml')
+        if os.path.isfile(tags_path):
+            subprocess.run(['mkvpropedit', dst_mkv, '--tags', f'global:{tags_path}'],
+                           check=True, capture_output=True, text=True, timeout=60)
+            log("  [TAGS] Injected tags.xml")
+
+        for fname in ('movie.nfo', 'poster.jpg', 'fanart.jpg'):
+            src_file = os.path.join(foreign_folder, fname)
+            if os.path.isfile(src_file):
+                shutil.copy2(src_file, os.path.join(dst_folder, fname))
+
+        log(f"✔ [DONE] Foreign-remuxed {base} in {time.perf_counter()-t0:.2f}s")
+
+        try:
+            shutil.rmtree(foreign_folder)
+        except Exception as cleanup_error:
+            log(f"❌ [CLEANUP] Failed to delete foreign folder: {cleanup_error}")
+
+    except subprocess.CalledProcessError as e:
+        detail = ((e.output or '') + (e.stderr or '')).strip()[:500]
+        log(f"❌ mkvmerge/mkvpropedit failed on {base}: {detail}")
+        if dst_folder and os.path.isdir(dst_folder):
+            shutil.rmtree(dst_folder, ignore_errors=True)
+        if os.path.isdir(foreign_folder):
+            _move_to_failed(foreign_folder, base)
+    except Exception as e:
+        log(f"❌ ERROR on {base}: {e}\n{traceback.format_exc()}")
+        if dst_folder and os.path.isdir(dst_folder):
+            shutil.rmtree(dst_folder, ignore_errors=True)
+        if os.path.isdir(foreign_folder):
+            _move_to_failed(foreign_folder, base)
+
+def main():
+    global shutdown_requested
+
+    for d in (LOG_DIR, CLEANED_DIR, REVIEW_DIR, FAILED_DIR, FOREIGN_DIR, TAGGED_DIR):
+        os.makedirs(d, exist_ok=True)
+
+    tagged_folders = [os.path.join(TAGGED_DIR, d) for d in os.listdir(TAGGED_DIR)
+                      if os.path.isdir(os.path.join(TAGGED_DIR, d)) and not d.startswith('.')]
+    foreign_folders = [os.path.join(FOREIGN_DIR, d) for d in os.listdir(FOREIGN_DIR)
+                       if os.path.isdir(os.path.join(FOREIGN_DIR, d)) and not d.startswith('.')]
+    total = len(tagged_folders) + len(foreign_folders)
+    log(f"▶ Starting cleanroom remux: {len(tagged_folders)} tagged, "
+        f"{len(foreign_folders)} foreign (max {MAX_WORKERS} threads)")
+
+    if total:
+        try:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                futures = [pool.submit(remux_folder, f) for f in tagged_folders]
+                futures += [pool.submit(remux_foreign_folder, f) for f in foreign_folders]
+                completed = 0
+
+                try:
+                    for fut in as_completed(futures):
+                        completed += 1
+                        log(f"📊 Progress: {completed}/{total} folders completed")
+
+                        if shutdown_requested:
+                            log("⚠️ Shutdown requested, cancelling remaining tasks...")
+                            for f in futures:
+                                f.cancel()
+                            pool.shutdown(wait=False)
+                            log("⚠️ Shutdown complete. Some folders may not have been processed.")
+                            return
+
+                        try:
+                            fut.result(timeout=1800)
+                        except Exception as e:
+                            log(f"❌ Worker thread error: {e}")
+                            log(f"❌ Worker thread traceback: {traceback.format_exc()}")
+
+                except KeyboardInterrupt:
+                    log("⚠️ Received interrupt signal, shutting down gracefully...")
+                    shutdown_requested = True
+                    for f in futures:
+                        f.cancel()
+                    pool.shutdown(wait=False)
+                    log("⚠️ Shutdown complete. Some folders may not have been processed.")
+                    return
+
+        except KeyboardInterrupt:
+            log("⚠️ Received interrupt signal during startup, exiting...")
+            return
+
+    log("✅ All remux operations completed.")
+
+
+if __name__ == "__main__":
+    main()
