@@ -44,6 +44,18 @@ def mkv_identify(mkv_path):
     return json.loads(result.stdout)
 
 
+def run_mkvmerge(cmd, base, timeout):
+    # mkvmerge exit codes: 0 = success, 1 = warnings (output still written),
+    # 2 = fatal error. mkvmerge writes its diagnostics to stdout, not stderr.
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode == 1:
+        warn = (result.stdout or '').strip()[:500]
+        log(f"⚠ mkvmerge warnings on {base} (output kept): {warn}")
+    elif result.returncode >= 2:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, output=result.stdout, stderr=result.stderr)
+
+
 def is_eng_lang(lang):
     if not lang or lang.lower() in ('', 'und', 'en', 'eng', 'en-us', 'en-gb'):
         return True
@@ -92,6 +104,18 @@ def audio_codec_rank(codec_id):
     if 'AAC' in c: return 6
     if 'MPEG/L3' in c or 'MP3' in c: return 7
     return 99
+
+
+def track_codec_short(track):
+    # mkvmerge -J fills `properties.codec_id` for Matroska sources only; for
+    # MP4 it leaves codec_id=None and exposes a human-readable `codec` field
+    # at the track top level. Fall through to that so the codec slug in the
+    # output filename is sensible even for non-Matroska-origin tracks.
+    p = track.get('properties') or {}
+    cid = p.get('codec_id')
+    if cid:
+        return codec_id_short(cid)
+    return codec_id_short(track.get('codec') or '')
 
 
 def codec_id_short(codec_id):
@@ -143,15 +167,26 @@ def pick_best_subtitle(tracks):
 def enhanced_episode_name(stem, video_track, audio_track, ext='.mkv'):
     """stem: filename without extension, e.g. 'Show_S01E01_Title'."""
     v_props = (video_track or {}).get('properties') or {}
-    a_props = (audio_track or {}).get('properties') or {}
 
     dims = v_props.get('pixel_dimensions') or ''
     height = dims.split('x')[-1] if 'x' in dims else 'unknown'
 
-    v_codec = codec_id_short(v_props.get('codec_id'))
-    a_codec = codec_id_short(a_props.get('codec_id'))
+    v_codec = track_codec_short(video_track or {})
+    a_codec = track_codec_short(audio_track or {})
 
     return f"{stem}_[{height}p_{v_codec}_{a_codec}]{ext}"
+
+
+def _cleanup_partial(dst_mkv):
+    # A timed-out or fatally-failed mkvmerge leaves a truncated output. Remove
+    # it so the resume-skip in remux_episode (getsize > 0) re-does the job
+    # instead of accepting the partial file as a finished episode.
+    if dst_mkv and os.path.isfile(dst_mkv):
+        try:
+            os.remove(dst_mkv)
+            log(f"    [CLEANUP] Removed partial output: {os.path.basename(dst_mkv)}")
+        except OSError as e:
+            log(f"    ⚠ Could not remove partial output {dst_mkv}: {e}")
 
 
 def _move_to_failed(folder, base):
@@ -207,6 +242,7 @@ def remux_episode(job):
     t0 = time.perf_counter()
     log(f"  ▶ Remuxing: {show_base}/{season_dir}/{fname}")
 
+    dst_mkv = None
     try:
         info = mkv_identify(src_mkv)
         tracks = info.get('tracks') or []
@@ -256,7 +292,9 @@ def remux_episode(job):
             cmd += ['--no-subtitles']
         cmd += [src_mkv]
 
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=1800)
+        # 3600s matches the movie remux: benign mkvmerge warnings (exit 1) keep
+        # the output; only exit >=2 is treated as a real failure.
+        run_mkvmerge(cmd, fname, timeout=3600)
 
         sib_nfo = os.path.splitext(src_mkv)[0] + '.nfo'
         if os.path.isfile(sib_nfo):
@@ -267,11 +305,16 @@ def remux_episode(job):
         return ('ok', job, None)
 
     except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or '').strip()[:500]
-        log(f"    ❌ mkvmerge failed on {fname}: {stderr}")
-        return ('failed', job, stderr)
+        # mkvmerge writes diagnostics to stdout (e.output), not stderr.
+        detail = ((e.output or '') + (e.stderr or '')).strip()[:500]
+        log(f"    ❌ mkvmerge failed on {fname}: {detail}")
+        _cleanup_partial(dst_mkv)
+        return ('failed', job, detail)
     except Exception as e:
+        # Covers TimeoutExpired and any other error. Drop a partial output so
+        # the resume-skip (getsize > 0) doesn't later accept it as complete.
         log(f"    ❌ ERROR on {fname}: {e}")
+        _cleanup_partial(dst_mkv)
         return ('failed', job, str(e))
 
 
