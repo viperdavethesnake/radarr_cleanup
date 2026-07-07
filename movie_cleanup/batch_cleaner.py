@@ -12,7 +12,6 @@ load_dotenv()
 SOURCE_DIR = './movies'
 DEST_DIR = './tagged'
 REVIEW_DIR = './review'
-FOREIGN_DIR = './foreign'
 FAILED_DIR = './failed'
 LOG_DIR = './logs'
 MAX_WORKERS = 8
@@ -310,23 +309,6 @@ def _delete_junk_nfos(folder):
             except Exception as e:
                 log(f"  [WARN] Could not delete scene NFO: {f}: {e}")
 
-def _process_foreign(src_folder, base, meta, imdbid, poster_url, fanart_url):
-    dst_folder = os.path.join(FOREIGN_DIR, base)
-    if os.path.exists(dst_folder):
-        raise Exception(f"Foreign target already exists: {dst_folder}")
-
-    log(f"  [FOREIGN] original_language={meta.get('original_language')} — routing to ./foreign/")
-    timed(f"Move to foreign: {src_folder} → {dst_folder}", shutil.move, src_folder, dst_folder)
-
-    timed("Download poster", download_image, poster_url, os.path.join(dst_folder, "poster.jpg"))
-    timed("Download fanart", download_image, fanart_url, os.path.join(dst_folder, "fanart.jpg"))
-    timed("Write metadata.json", write_json, meta, os.path.join(dst_folder, "metadata.json"))
-    timed("Write tags.xml", write_tags_xml, meta, imdbid, os.path.join(dst_folder, "tags.xml"))
-    timed("Write movie.nfo", write_nfo, meta, imdbid, os.path.join(dst_folder, "movie.nfo"))
-    _delete_junk_nfos(dst_folder)
-
-    log(f"[FOREIGN DONE] Staged {base} for later processing")
-
 def clean_folder(src_folder):
     global shutdown_requested
     if shutdown_requested:
@@ -355,8 +337,7 @@ def clean_folder(src_folder):
         video = videos[0]
         src_video = os.path.join(src_folder, video)
 
-        # MP4 is not an accepted source container — flag and fail any .mp4
-        # (applies to both English and foreign-language sources).
+        # MP4 is not an accepted source container — flag and fail any .mp4.
         if not video.lower().endswith('.mkv'):
             log(f"❌ [FAILED] MP4 source not accepted: {video} — moving to failed")
             _move_to_failed(src_folder, base)
@@ -372,8 +353,12 @@ def clean_folder(src_folder):
 
         meta, poster_url, fanart_url = timed(f"TMDb lookup for {imdbid}", fetch_tmdb_metadata, imdbid)
 
+        # Foreign-original films are not handled by this pipeline — they are
+        # managed by separate scripts / manual processes. Flag and fail them.
         if meta.get('original_language') != 'en':
-            _process_foreign(src_folder, base, meta, imdbid, poster_url, fanart_url)
+            log(f"❌ [FAILED] Foreign original (original_language="
+                f"{meta.get('original_language')}) — not handled here, moving to failed")
+            _move_to_failed(src_folder, base)
             return
 
         new_base = clean_folder_name(meta)
@@ -407,7 +392,7 @@ def clean_folder(src_folder):
 def main():
     global shutdown_requested
 
-    for d in (LOG_DIR, DEST_DIR, REVIEW_DIR, FOREIGN_DIR, FAILED_DIR):
+    for d in (LOG_DIR, DEST_DIR, REVIEW_DIR, FAILED_DIR):
         os.makedirs(d, exist_ok=True)
 
     srcs = [os.path.join(SOURCE_DIR, d) for d in os.listdir(SOURCE_DIR)

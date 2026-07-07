@@ -7,10 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A media library management toolkit for cleaning, enriching, and transcoding MKV files destined for Jellyfin. It fetches TMDB metadata, selects optimal audio/subtitle tracks, remuxes MKVs, verifies structure, and optionally transcodes to AV1. There is a parallel pipeline for movies and TV shows.
 
 Pipeline order:
-1. `batch_cleaner.py` / `tv_batch_cleaner.py` — TMDB metadata, NFO generation, MKV tag injection. English-original films are staged into `./tagged/`; foreign-original films (TMDB `original_language != 'en'`) are staged into `./foreign/` with sidecars but no track selection.
-2. `mkv_remux_cleanroom.py` / `tv_mkv_remux_cleanroom.py` — track selection, chapter/attachment removal. The movie variant scans **both** `./tagged/` (English-preference rules) and `./foreign/` (original-language audio, English text-or-PGS sub, tag injection from sidecar tags.xml).
+1. `batch_cleaner.py` / `tv_batch_cleaner.py` — TMDB metadata, NFO generation, MKV tag injection. English-original films are staged into `./tagged/`. Foreign-original films (TMDB `original_language != 'en'`) are **not handled by this pipeline** — they are moved to `./failed/` and managed by separate scripts / manual processes.
+2. `mkv_remux_cleanroom.py` / `tv_mkv_remux_cleanroom.py` — track selection, chapter/attachment removal. Scans `./tagged/` only and writes to `./cleaned/`. The movie pipeline touches only `movies/` → `tagged/` → `cleaned/` (plus `failed/`/`review/`); it never reads or writes `./foreign/`.
 3. `verify_movies.py` — Jellyfin compatibility validation (movies only)
-4. `foreign_post_processor.py` — legacy IETF BCP 47 language normalization (superseded by mkv_remux_cleanroom's foreign path; kept for reference)
 
 ## Running Scripts
 
@@ -51,7 +50,7 @@ Scripts load configuration from `.env` (not committed; see `.env.example`). All 
 | `TMDB_API_KEY` | Required — TMDB API key |
 | `RC_MEDIA_BASE` | Root path for media storage |
 | `RC_MEDIA_OWNER` / `RC_MEDIA_GROUP` | Ownership for `fix_media_perms.py` |
-| `RC_VERIFY_SCAN_DIR`, `RC_FOREIGN_DIR`, `RC_CLEANED_DIR` | Movie script paths |
+| `RC_VERIFY_SCAN_DIR`, `RC_CLEANED_DIR` | Movie script paths |
 | `RC_MOVIES_DIR`, `RC_WORK_DIR`, `RC_OUTPUT_DIR` | AV1 analyzer paths |
 | `RC_FFMPEG_BIN`, `RC_FFPROBE_BIN`, `RC_FFMPEG_PREFIX` | Custom FFmpeg locations |
 
@@ -68,7 +67,7 @@ Python packages: `requests`, `python-dotenv`, `numpy`, `matplotlib` (see `requir
 
 **Concurrency**: All major scripts use `ThreadPoolExecutor`. Worker counts are tuned per workload: 8 for network-bound (TMDB metadata), 4 for the remux stage (`MAX_WORKERS` in **both** `mkv_remux_cleanroom.py` and `tv_mkv_remux_cleanroom.py`). The remux stage is **storage-bound, not CPU-bound** — each `mkvmerge` is a demux/remux of a 40–90 GB file, so the bottleneck is ZFS pool bandwidth, not cores. Running too many in parallel splits that one pool N ways, collapses per-job throughput, and trips the 1800s per-job timeout (this happened at 12-way: 9 of 16 jobs timed out and landed in `./failed/`). Keep both at 4 so each job gets enough bandwidth to finish well under the timeout and leaves I/O headroom for co-resident Jellyfin/Frigate/Ollama. More threads do **not** make remux faster here. Scripts register `SIGINT`/`SIGTERM` handlers for graceful shutdown.
 
-**File routing**: Failed files go to `./failed/` or `./failed_tv/`. Files needing manual review (multiple video tracks, no acceptable audio) go to `./review/` or `./review_tv/`. Foreign-language sources are staged at `./foreign/` or `./foreign_tv/`.
+**File routing**: Failed files go to `./failed/` or `./failed_tv/`. Files needing manual review (multiple video tracks, no acceptable audio) go to `./review/` or `./review_tv/`. Foreign-original sources are **not processed by this pipeline** — the movie batch step routes them to `./failed/` and they are handled by separate scripts / manual work.
 
 **Metadata formats**:
 - `movie.nfo` / `tvshow.nfo` / per-episode `<episodedetails>` NFO — Jellyfin-compatible XML

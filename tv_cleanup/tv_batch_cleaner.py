@@ -13,7 +13,6 @@ load_dotenv()
 SOURCE_DIR = './tvshows'
 DEST_DIR = './tagged_tv'
 REVIEW_DIR = './review_tv'
-FOREIGN_DIR = './foreign_tv'
 FAILED_DIR = './failed_tv'
 LOG_DIR = './logs'
 MAX_WORKERS = 8
@@ -390,20 +389,6 @@ def _move_to_failed(src_folder, base):
         log(f"❌ Could not move to failed: {e}")
 
 
-def _process_foreign(src_folder, base, meta, imdb_id, tvdb_id, poster_url, fanart_url):
-    dst_folder = os.path.join(FOREIGN_DIR, base)
-    if os.path.exists(dst_folder):
-        raise Exception(f"Foreign target already exists: {dst_folder}")
-    log(f"  [FOREIGN] original_language={meta.get('original_language')} — routing to ./foreign_tv/")
-    timed(f"Move to foreign: {src_folder} → {dst_folder}", shutil.move, src_folder, dst_folder)
-    timed("Download poster", download_image, poster_url, os.path.join(dst_folder, "poster.jpg"))
-    timed("Download fanart", download_image, fanart_url, os.path.join(dst_folder, "fanart.jpg"))
-    timed("Write metadata.json", write_json, meta, os.path.join(dst_folder, "metadata.json"))
-    timed("Write tvshow.nfo", write_tvshow_nfo, meta, imdb_id, tvdb_id,
-          os.path.join(dst_folder, "tvshow.nfo"))
-    log(f"[FOREIGN DONE] Staged {base} for later processing")
-
-
 def _find_videos(folder):
     """Walk show folder; return list of (season_num_or_None, video_path)."""
     out = []
@@ -453,8 +438,12 @@ def clean_show_folder(src_folder):
             _move_to_failed(src_folder, base)
             return
 
+        # Foreign-original shows are not handled by this pipeline — they are
+        # managed by separate scripts / manual processes. Flag and fail them.
         if meta.get('original_language') != 'en':
-            _process_foreign(src_folder, base, meta, imdb_id, tvdb_id, poster_url, fanart_url)
+            log(f"❌ [FAILED] Foreign original (original_language="
+                f"{meta.get('original_language')}) — not handled here, moving to failed")
+            _move_to_failed(src_folder, base)
             return
 
         new_base = show_folder_name(meta)
@@ -590,7 +579,7 @@ def clean_show_folder(src_folder):
 def main():
     global shutdown_requested
 
-    for d in (LOG_DIR, DEST_DIR, REVIEW_DIR, FOREIGN_DIR, FAILED_DIR):
+    for d in (LOG_DIR, DEST_DIR, REVIEW_DIR, FAILED_DIR):
         os.makedirs(d, exist_ok=True)
 
     srcs = [os.path.join(SOURCE_DIR, d) for d in os.listdir(SOURCE_DIR)
