@@ -39,8 +39,11 @@ def log(msg):
 
 
 def mkv_identify(mkv_path):
+    # 300s (not 30s): metadata reads can stall behind the four concurrent
+    # remuxes saturating the same ZFS pool — same lesson as batch_cleaner's
+    # strip_attachments timeout.
     result = subprocess.run(['mkvmerge', '-J', mkv_path],
-                            capture_output=True, text=True, check=True, timeout=30)
+                            capture_output=True, text=True, check=True, timeout=300)
     return json.loads(result.stdout)
 
 
@@ -51,7 +54,9 @@ def run_mkvmerge(cmd, base, timeout):
     if result.returncode == 1:
         warn = (result.stdout or '').strip()[:500]
         log(f"⚠ mkvmerge warnings on {base} (output kept): {warn}")
-    elif result.returncode >= 2:
+    elif result.returncode != 0:
+        # >=2 is a fatal mkvmerge error; negative means killed by a signal
+        # (Ctrl+C, OOM) with a truncated output — both are failures.
         raise subprocess.CalledProcessError(
             result.returncode, cmd, output=result.stdout, stderr=result.stderr)
 
@@ -92,6 +97,16 @@ def is_sub_junk(track):
     return False
 
 
+def codec_probe(track):
+    """Combined codec-id + human-readable codec string for rank/slug matching.
+
+    Matroska's codec_id alone can't distinguish DTS variants — every one of
+    them is A_DTS, so "DTS-HD MA" is only visible in mkvmerge's `codec` field.
+    MP4 sources have no codec_id at all. Combining both covers both gaps.
+    """
+    p = track.get('properties') or {}
+    return f"{p.get('codec_id') or ''} {track.get('codec') or ''}"
+
 def audio_codec_rank(codec_id):
     # Lower is better. EAC3 > AC3 (modern preference).
     c = (codec_id or '').upper()
@@ -111,11 +126,7 @@ def track_codec_short(track):
     # MP4 it leaves codec_id=None and exposes a human-readable `codec` field
     # at the track top level. Fall through to that so the codec slug in the
     # output filename is sensible even for non-Matroska-origin tracks.
-    p = track.get('properties') or {}
-    cid = p.get('codec_id')
-    if cid:
-        return codec_id_short(cid)
-    return codec_id_short(track.get('codec') or '')
+    return codec_id_short(codec_probe(track))
 
 
 def codec_id_short(codec_id):
@@ -147,7 +158,7 @@ def pick_best_audio(tracks):
         audios = [t for t in tracks if t['type'] == 'audio' and not is_audio_junk(t)]
     if not audios:
         return None
-    audios.sort(key=lambda t: audio_codec_rank((t.get('properties') or {}).get('codec_id')))
+    audios.sort(key=lambda t: audio_codec_rank(codec_probe(t)))
     return audios[0]
 
 
@@ -228,6 +239,31 @@ def _episode_dst_name(src_mkv, tracks):
     return enhanced_episode_name(stem, video_tracks[0], audio, '.mkv')
 
 
+def _container_duration_s(info):
+    try:
+        ns = ((info.get('container') or {}).get('properties') or {}).get('duration')
+        return ns / 1e9 if ns else None
+    except Exception:
+        return None
+
+
+def _resume_output_ok(dst_mkv, src_info):
+    """Validate a prior run's output before resume-skipping it.
+
+    mkvmerge must read it without warnings, and if both durations are known
+    the output must run as long as the source (remux preserves duration).
+    """
+    try:
+        dst_info = mkv_identify(dst_mkv)
+    except Exception:
+        return False
+    src_dur = _container_duration_s(src_info)
+    dst_dur = _container_duration_s(dst_info)
+    if src_dur and dst_dur and abs(src_dur - dst_dur) > 5.0:
+        return False
+    return True
+
+
 def remux_episode(job):
     """job: dict with src_mkv, dst_dir, show_base, season_dir, tagged_folder."""
     if shutdown_requested:
@@ -259,19 +295,33 @@ def remux_episode(job):
 
         video = video_tracks[0]
         audio = pick_best_audio(tracks)
+        # No acceptable audio (e.g. commentary-only): without an explicit
+        # --audio-tracks selector mkvmerge would copy EVERY audio track, so
+        # this must go to a human, not through the remux.
+        if audio is None:
+            log(f"    [REVIEW] No acceptable audio track in {fname} — needs human review")
+            _move_episode_to_review(src_mkv, show_base, season_dir)
+            return ('review', job, None)
         subtitle = pick_best_subtitle(tracks)
 
         dst_name = enhanced_episode_name(stem, video, audio, '.mkv')
         dst_mkv = os.path.join(dst_dir, dst_name)
 
-        # Resume support: skip if a non-empty output already exists
+        # Resume support: skip only if the existing output survives validation.
+        # A hard kill (SIGKILL, power loss) can leave a truncated output that
+        # "exists and is non-empty" — require that mkvmerge can read it cleanly
+        # and that its duration matches the source before trusting it.
         if os.path.isfile(dst_mkv) and os.path.getsize(dst_mkv) > 0:
-            log(f"    [SKIP] Output exists: {dst_name}")
-            sib_nfo = os.path.splitext(src_mkv)[0] + '.nfo'
-            dst_nfo = os.path.splitext(dst_mkv)[0] + '.nfo'
-            if os.path.isfile(sib_nfo) and not os.path.isfile(dst_nfo):
-                shutil.copy2(sib_nfo, dst_nfo)
-            return ('ok', job, None)
+            if _resume_output_ok(dst_mkv, info):
+                log(f"    [SKIP] Output exists and validates: {dst_name}")
+                sib_nfo = os.path.splitext(src_mkv)[0] + '.nfo'
+                dst_nfo = os.path.splitext(dst_mkv)[0] + '.nfo'
+                if os.path.isfile(sib_nfo) and not os.path.isfile(dst_nfo):
+                    shutil.copy2(sib_nfo, dst_nfo)
+                return ('ok', job, None)
+            log(f"    [RESUME] Existing output failed validation (truncated?); "
+                f"redoing: {dst_name}")
+            os.remove(dst_mkv)
 
         os.makedirs(dst_dir, exist_ok=True)
         log(f"    [NAME] {dst_name}")
@@ -283,7 +333,13 @@ def remux_episode(job):
         cmd = ['mkvmerge', '-o', dst_mkv, '--no-chapters', '--no-attachments',
                '--video-tracks', video_id]
         if audio_id is not None:
-            cmd += ['--audio-tracks', audio_id, '--language', f'{audio_id}:eng']
+            cmd += ['--audio-tracks', audio_id]
+            # Relabel to eng only when the track is English/und (und on an
+            # English-original show is assumed English). The non-English
+            # fallback keeps its real language tag — forcing eng would ship
+            # e.g. a Japanese track asserting it's English.
+            if is_eng_lang((audio.get('properties') or {}).get('language')):
+                cmd += ['--language', f'{audio_id}:eng']
         if subtitle_id is not None:
             cmd += ['--subtitle-tracks', subtitle_id,
                     '--language', f'{subtitle_id}:eng',

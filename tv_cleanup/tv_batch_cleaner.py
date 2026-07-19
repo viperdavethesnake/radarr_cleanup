@@ -15,7 +15,7 @@ DEST_DIR = './tagged_tv'
 REVIEW_DIR = './review_tv'
 FAILED_DIR = './failed_tv'
 LOG_DIR = './logs'
-MAX_WORKERS = 8
+MAX_WORKERS = 4
 TMDB_API_KEY = os.getenv('TMDB_API_KEY', 'your_api_key_here')
 
 TVDB_RE = re.compile(r'tvdbid-(\d+)', re.IGNORECASE)
@@ -161,9 +161,24 @@ def download_image(url, dest):
             f.write(chunk)
 
 
+def _resume_output_ok(dst_mkv):
+    """A prior-run output counts as done only if mkvmerge can fully read it
+    and the injected identity tags are present (tagging is the final step)."""
+    try:
+        result = subprocess.run(['mkvmerge', '-J', dst_mkv],
+                                capture_output=True, text=True, check=True, timeout=300)
+        info = json.loads(result.stdout)
+        return bool(info.get('global_tags'))
+    except Exception:
+        return False
+
+
 def strip_attachments(mkvfile):
+    # 300s (not the old 30s): the pool is storage-bound, and this read can stall
+    # behind concurrent big I/O (other workers' fast_copy, or a manual remux job)
+    # even though it's just a metadata read, not a full remux.
     result = subprocess.run(['mkvmerge', '-J', mkvfile],
-                            capture_output=True, text=True, check=True, timeout=30)
+                            capture_output=True, text=True, check=True, timeout=300)
     info = json.loads(result.stdout)
     attachments = info.get('attachments', [])
     if not attachments:
@@ -485,6 +500,13 @@ def clean_show_folder(src_folder):
                     log(f"  [WARN] No SxxExx in {fname}; skipping")
                     ep_failed += 1
                     continue
+                # Multi-episode files (S01E01E02 / S01E01-E02) would be tagged
+                # and named as the first episode only — the second episode
+                # silently vanishes from the library. Fail them for manual split.
+                if re.match(r'[-–]?[Ee]\d{1,3}', fname[m.end():]) or SE_RE.search(fname, m.end()):
+                    log(f"  [WARN] Multi-episode file not supported (split manually): {fname}")
+                    ep_failed += 1
+                    continue
                 episode_num = int(m.group(2))
                 ep_meta = episodes_by_num.get(episode_num) or {
                     'name': f'Episode_{episode_num}',
@@ -503,9 +525,18 @@ def clean_show_folder(src_folder):
                 seen_in_run.add(dst_mkv)
 
                 if os.path.isfile(dst_mkv) and os.path.getsize(dst_mkv) > 0:
-                    log(f"  [SKIP] Output exists from prior run: {ep_filename}")
-                    ep_ok += 1
-                    continue
+                    # Trust a prior run's output only if mkvmerge reads it
+                    # cleanly AND the identity tags are present — tag injection
+                    # is the last step, so their presence proves the episode
+                    # finished. A hard kill can leave a truncated or untagged
+                    # copy that would otherwise pass the size>0 check forever.
+                    if _resume_output_ok(dst_mkv):
+                        log(f"  [SKIP] Output exists and validates: {ep_filename}")
+                        ep_ok += 1
+                        continue
+                    log(f"  [RESUME] Existing output failed validation "
+                        f"(truncated or untagged); redoing: {ep_filename}")
+                    os.remove(dst_mkv)
 
                 try:
                     if vpath.lower().endswith('.mkv'):
@@ -553,8 +584,17 @@ def clean_show_folder(src_folder):
             timed(f"Delete original folder: {src_folder}", shutil.rmtree, src_folder)
             log(f"✔ [DONE] {base}: {ep_ok}/{ep_total} episodes, total {(time.perf_counter()-t0):.2f}s\n")
         else:
+            # DEST_DIR must only ever hold complete shows — the remux stage
+            # publishes whatever it finds there. Park the incomplete output in
+            # failed_tv/ (same convention as the exception path below) and keep
+            # the source for a re-run.
+            partial_dest = os.path.join(FAILED_DIR, f"{base}_cleaned_partial")
+            os.makedirs(FAILED_DIR, exist_ok=True)
+            if os.path.exists(partial_dest):
+                shutil.rmtree(partial_dest, ignore_errors=True)
+            shutil.move(dst_show_folder, partial_dest)
             log(f"⚠ [PARTIAL] {base}: {ep_ok}/{ep_total} ok, {ep_failed} failed; "
-                f"source kept at {src_folder}\n")
+                f"incomplete output parked at {partial_dest}; source kept at {src_folder}\n")
 
     except Exception as e:
         log(f"❌ ERROR processing {base}: {e}\n{traceback.format_exc()}")

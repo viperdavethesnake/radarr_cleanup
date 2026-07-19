@@ -146,7 +146,8 @@ def check_mkv_structure(mkv_path):
             'subtitles': len([t for t in tracks if t['type'] == 'subtitles']),
             'attachments': len(info.get('attachments', [])),
             'chapters': len(info.get('chapters', [])),
-            'global_tags': len(info.get('tags', []))
+            # mkvmerge -J reports global tags under 'global_tags' (not 'tags')
+            'global_tags': len(info.get('global_tags', []))
         }
         
         # Check for specific issues
@@ -168,9 +169,14 @@ def check_mkv_structure(mkv_path):
         if track_counts['attachments'] > 0:
             issues.append(f"Found {track_counts['attachments']} attachments - not cleaned")
         
-        # Global tags (should be 0 after batch_cleaner)
-        if track_counts['global_tags'] > 0:
-            issues.append(f"Found {track_counts['global_tags']} global tags - not cleaned")
+        # Chapters (remux runs mkvmerge with --no-chapters, so 0 expected)
+        if track_counts['chapters'] > 0:
+            issues.append(f"Found {track_counts['chapters']} chapter editions - not stripped by remux")
+
+        # Global tags are the pipeline's source of truth (IMDb/TMDB identity
+        # injected by batch_cleaner) — their ABSENCE is the defect.
+        if track_counts['global_tags'] == 0:
+            issues.append("No global tags - embedded IMDb/TMDB identity missing")
         
         # Check audio track language
         audio_tracks = [t for t in tracks if t['type'] == 'audio']
@@ -256,15 +262,16 @@ def check_folder_structure(folder):
     """Check if folder name follows expected format"""
     folder_name = os.path.basename(folder)
     
-    # Expected format: "Movie Title (Year)" or "Movie Title (Year) imdbid"
+    # Expected format: "Movie_Title_(Year)" — the pipeline uses underscores for
+    # spaces (Jellyfin/Infuse compatibility). Space-separated names and an
+    # optional trailing imdbid are accepted for pre-pipeline folders.
     import re
-    
-    # Pattern for "Title (Year)" or "Title (Year) imdbid"
-    pattern = r'^(.+?)\s+\((\d{4})\)(?:\s+(tt\d{7,9}))?$'
+
+    pattern = r'^(.+?)[_ ]\((\d{4})\)(?:[_ ](tt\d{7,9}))?$'
     match = re.match(pattern, folder_name)
-    
+
     if not match:
-        return False, "Folder name doesn't match expected format: 'Title (Year)' or 'Title (Year) imdbid'"
+        return False, "Folder name doesn't match expected format: 'Movie_Title_(Year)'"
     
     title, year, imdbid = match.groups()
     

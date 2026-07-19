@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import os, shutil, time, traceback, json, subprocess, re, signal
+import os, shutil, time, traceback, json, subprocess, re, signal, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from xml.etree.ElementTree import Element, SubElement, ElementTree
@@ -14,7 +14,7 @@ DEST_DIR = './tagged'
 REVIEW_DIR = './review'
 FAILED_DIR = './failed'
 LOG_DIR = './logs'
-MAX_WORKERS = 8
+MAX_WORKERS = 4
 TMDB_API_KEY = os.getenv('TMDB_API_KEY', 'your_api_key_here')
 
 IMDB_RE = re.compile(r'tt\d{6,9}')
@@ -109,14 +109,15 @@ def fetch_tmdb_metadata(imdbid):
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-    d = None
-    for key in ['movie_results', 'tv_results']:
-        if data.get(key):
-            d = data[key][0]
-            break
-    if not d:
-        raise Exception("TMDB lookup failed for " + str(imdbid))
-    tmdb_id = d['id']
+    # Movie results only: TMDB movie and TV ids are independent namespaces, so
+    # feeding a tv_results id to the /movie/ endpoint can bind the file to a
+    # completely unrelated film. An IMDb id that only resolves as TV is not a
+    # movie — fail it out to ./failed/ instead.
+    movie_results = data.get('movie_results') or []
+    if not movie_results:
+        raise Exception(f"TMDB lookup for {imdbid} returned no movie results"
+                        + (" (matched a TV entry — not a movie)" if data.get('tv_results') else ""))
+    tmdb_id = movie_results[0]['id']
     url = f'https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={TMDB_API_KEY}&append_to_response=credits,belongs_to_collection,release_dates'
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
@@ -135,8 +136,11 @@ def download_image(url, dest):
             f.write(chunk)
 
 def strip_attachments(mkvfile):
+    # 300s (not the old 30s): the pool is storage-bound, and this read can stall
+    # behind concurrent big I/O (other workers' fast_copy, or a manual remux job)
+    # even though it's just a metadata read, not a full remux.
     result = subprocess.run(['mkvmerge', '-J', mkvfile],
-                            capture_output=True, text=True, check=True, timeout=30)
+                            capture_output=True, text=True, check=True, timeout=300)
     info = json.loads(result.stdout)
     attachments = info.get('attachments', [])
     if not attachments:
@@ -309,6 +313,10 @@ def _delete_junk_nfos(folder):
             except Exception as e:
                 log(f"  [WARN] Could not delete scene NFO: {f}: {e}")
 
+# Destination folders claimed this run (dedupe guard across workers).
+_claim_lock = threading.Lock()
+_claimed_dsts = set()
+
 def clean_folder(src_folder):
     global shutdown_requested
     if shutdown_requested:
@@ -363,6 +371,19 @@ def clean_folder(src_folder):
 
         new_base = clean_folder_name(meta)
         dst_folder = os.path.join(DEST_DIR, new_base)
+
+        # Two source folders can resolve to the same movie (e.g. an upgrade
+        # sitting next to the original). Without this claim, both workers would
+        # fast_copy to the same destination file concurrently (corrupt output)
+        # and either error handler could rmtree the shared folder.
+        with _claim_lock:
+            if dst_folder in _claimed_dsts:
+                log(f"[REVIEW] {base}: duplicate of an in-flight/processed title "
+                    f"({new_base}) — needs human review")
+                shutil.move(src_folder, os.path.join(REVIEW_DIR, base))
+                return
+            _claimed_dsts.add(dst_folder)
+
         os.makedirs(dst_folder, exist_ok=True)
         dst_mkv = os.path.join(dst_folder, clean_file_name(meta, '.mkv'))
 
@@ -379,7 +400,15 @@ def clean_folder(src_folder):
         timed("Inject tags.xml into MKV", set_tags_in_mkv, dst_mkv, tags_path)
         timed("Write movie.nfo", write_nfo, meta, imdbid, os.path.join(dst_folder, "movie.nfo"))
 
-        timed(f"Delete original folder: {src_folder}", shutil.rmtree, src_folder)
+        # Source deletion is post-success cleanup. If it fails (permissions,
+        # partial rmtree), the completed output in tagged/ is still good —
+        # never tear it down or send the half-deleted source to failed/,
+        # which could leave no intact copy of the movie at all.
+        try:
+            timed(f"Delete original folder: {src_folder}", shutil.rmtree, src_folder)
+        except Exception as e:
+            log(f"⚠ [WARN] {base}: output complete, but could not delete source "
+                f"{src_folder}: {e} — remove it manually")
         log(f"✔ [DONE] {base} total {(time.perf_counter()-t0):.2f}s\n")
 
     except Exception as e:

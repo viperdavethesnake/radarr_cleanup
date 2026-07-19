@@ -51,8 +51,11 @@ def log(msg):
         f.write(line + '\n')
 
 def mkv_identify(mkv_path):
+    # 300s (not 30s): metadata reads can stall behind the four concurrent
+    # remuxes saturating the same ZFS pool — same lesson as batch_cleaner's
+    # strip_attachments timeout.
     result = subprocess.run(['mkvmerge', '-J', mkv_path],
-                            capture_output=True, text=True, check=True, timeout=30)
+                            capture_output=True, text=True, check=True, timeout=300)
     return json.loads(result.stdout)
 
 def run_mkvmerge(cmd, base, timeout):
@@ -62,7 +65,9 @@ def run_mkvmerge(cmd, base, timeout):
     if result.returncode == 1:
         warn = (result.stdout or '').strip()[:500]
         log(f"⚠ mkvmerge warnings on {base} (output kept): {warn}")
-    elif result.returncode >= 2:
+    elif result.returncode != 0:
+        # >=2 is a fatal mkvmerge error; negative means killed by a signal
+        # (Ctrl+C, OOM) with a truncated output — both are failures.
         raise subprocess.CalledProcessError(
             result.returncode, cmd, output=result.stdout, stderr=result.stderr)
 
@@ -99,6 +104,16 @@ def is_sub_junk(track):
         return True
     return False
 
+def codec_probe(track):
+    """Combined codec-id + human-readable codec string for rank/slug matching.
+
+    Matroska's codec_id alone can't distinguish DTS variants — every one of
+    them is A_DTS, so "DTS-HD MA" is only visible in mkvmerge's `codec` field.
+    MP4 sources have no codec_id at all. Combining both covers both gaps.
+    """
+    p = track.get('properties') or {}
+    return f"{p.get('codec_id') or ''} {track.get('codec') or ''}"
+
 def audio_codec_rank(codec_id):
     # Lower is better. EAC3 > AC3 (modern preference).
     c = (codec_id or '').upper()
@@ -113,15 +128,7 @@ def audio_codec_rank(codec_id):
     return 99
 
 def track_codec_short(track):
-    # mkvmerge -J fills `properties.codec_id` for Matroska sources only; for
-    # MP4 it leaves codec_id=None and exposes a human-readable `codec` field
-    # at the track top level. Fall through to that so MP4 sources still
-    # produce a sensible codec slug in the output filename.
-    p = track.get('properties') or {}
-    cid = p.get('codec_id')
-    if cid:
-        return codec_id_short(cid)
-    return codec_id_short(track.get('codec') or '')
+    return codec_id_short(codec_probe(track))
 
 def codec_id_short(codec_id):
     c = (codec_id or '').upper()
@@ -152,7 +159,7 @@ def pick_best_audio(tracks):
         audios = [t for t in tracks if t['type'] == 'audio' and not is_audio_junk(t)]
     if not audios:
         return None
-    audios.sort(key=lambda t: audio_codec_rank((t.get('properties') or {}).get('codec_id')))
+    audios.sort(key=lambda t: audio_codec_rank(codec_probe(t)))
     return audios[0]
 
 def pick_best_subtitle(tracks):
@@ -248,6 +255,13 @@ def remux_folder(tagged_folder):
 
         video = video_tracks[0]
         audio = pick_best_audio(tracks)
+        # No acceptable audio (e.g. commentary-only): without an explicit
+        # --audio-tracks selector mkvmerge would copy EVERY audio track, so
+        # this must go to a human, not through the remux.
+        if audio is None:
+            log(f"[REVIEW] No acceptable audio track in {base} — needs human review")
+            _move_to_review(tagged_folder, base)
+            return
         subtitle = pick_best_subtitle(tracks)
 
         # Read metadata.json (written by batch_cleaner) for the enhanced filename
@@ -276,7 +290,13 @@ def remux_folder(tagged_folder):
         cmd = ['mkvmerge', '-o', dst_mkv, '--no-chapters', '--no-attachments',
                '--video-tracks', video_id]
         if audio_id is not None:
-            cmd += ['--audio-tracks', audio_id, '--language', f'{audio_id}:eng']
+            cmd += ['--audio-tracks', audio_id]
+            # Relabel to eng only when the track is English/und (und on an
+            # English-original film is assumed English). The non-English
+            # fallback keeps its real language tag — forcing eng would ship
+            # e.g. a French dub asserting it's English.
+            if is_eng_lang((audio.get('properties') or {}).get('language')):
+                cmd += ['--language', f'{audio_id}:eng']
         if subtitle_id is not None:
             cmd += ['--subtitle-tracks', subtitle_id,
                     '--language', f'{subtitle_id}:eng',
