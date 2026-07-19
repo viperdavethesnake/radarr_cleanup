@@ -3,10 +3,16 @@
 Compare two movie libraries and recommend which copy to keep.
 
 PathA (new copies):  /storage/media/servarr/cleaned
-PathB (older copies): /storage/media/movies
+PathB (older copies): /storage/media/movies,/storage/media/movies2 (default)
+
+PathB accepts multiple comma-separated roots, since the cold-storage migration
+split older titles across two datasets (movies + movies2). All roots are merged
+into a single EXISTING index for matching; --apply replaces a matched movie in
+place in whichever root it was actually found in.
 
 Either or both paths may be remote — pass --ssh-a user@host or --ssh-b user@host
-to run filesystem ops and ffprobe/mkvmerge over SSH for that side.
+to run filesystem ops and ffprobe/mkvmerge over SSH for that side (same SSH host
+is used for every comma-separated path-b root).
 
 Default run is read-only: prints a side-by-side summary and writes a JSON
 plan to ./logs/compare_plan_<ts>.json.
@@ -44,8 +50,10 @@ from xml.etree import ElementTree as ET
 # NEW = newly downloaded / newly processed copies (candidate replacements)
 DEFAULT_NEW_PATH = "/storage/media/servarr/cleaned"
 
-# EXISTING = your current library (the stuff you already have)
-DEFAULT_EXISTING_PATH = "/storage/media/movies"
+# EXISTING = your current library (the stuff you already have).
+# Comma-separated: split across two datasets since the cold-storage migration
+# moved older titles out to movies2.
+DEFAULT_EXISTING_PATH = "/storage/media/movies,/storage/media/movies2"
 
 SIDE_NEW = "NEW"
 SIDE_EXISTING = "EXISTING"
@@ -765,6 +773,22 @@ def index_library(root: str, side_label: str, shell: Shell, threads: int = 8) ->
     return by_key, problems
 
 
+def index_libraries(roots: List[str], side_label: str, shell: Shell, threads: int = 8) -> Tuple[Dict[Tuple[str, str], List[MovieEntry]], List[str]]:
+    """Index multiple roots (e.g. movies + movies2) and merge into one index.
+
+    A key found in more than one root ends up with >1 entries, which the
+    existing ambiguous-match logic in main() already handles correctly.
+    """
+    merged: Dict[Tuple[str, str], List[MovieEntry]] = {}
+    problems: List[str] = []
+    for root in roots:
+        by_key, root_problems = index_library(root, side_label, shell, threads=threads)
+        problems.extend(root_problems)
+        for k, entries in by_key.items():
+            merged.setdefault(k, []).extend(entries)
+    return merged, problems
+
+
 def _fmt_identity(e: MovieEntry) -> str:
     if e.title and e.year:
         return f"{e.title} ({e.year})"
@@ -1030,7 +1054,7 @@ def _planned_action(r: CompareResult) -> str:
 def _write_plan_file(
     path: str,
     path_new: str,
-    path_existing: str,
+    path_existing: List[str],
     only_new_keys: List[Tuple[str, str]],
     a_index: Dict[Tuple[str, str], List[MovieEntry]],
     results: List[CompareResult],
@@ -1079,8 +1103,14 @@ def _fix_perms_on(folder: str) -> None:
     subprocess.run([sys.executable, script, "--apply", folder], check=True)
 
 
-def _apply_one(r: CompareResult, library_root: str) -> Tuple[bool, str]:
-    """Execute a single applicable result. Returns (applied, message)."""
+def _apply_one(r: CompareResult) -> Tuple[bool, str]:
+    """Execute a single applicable result. Returns (applied, message).
+
+    Replacement always happens in place: the target root is derived from the
+    matched EXISTING folder's own parent directory, not a fixed library path.
+    This matters once EXISTING spans multiple roots (e.g. movies + movies2) —
+    a match found in movies2 must stay in movies2, not get relocated to movies.
+    """
     title_str = r.a_ent.title or r.b_ent.title or r.key[1]
     year_str = r.a_ent.year or r.b_ent.year or ""
     label = f"{title_str} ({year_str})".strip()
@@ -1088,6 +1118,7 @@ def _apply_one(r: CompareResult, library_root: str) -> Tuple[bool, str]:
     if r.keep == SIDE_NEW:
         new_folder = os.path.normpath(r.a_ent.folder)
         existing_folder = os.path.normpath(r.b_ent.folder)
+        library_root = os.path.dirname(existing_folder)
         target = os.path.join(library_root, os.path.basename(new_folder))
 
         # Safety: if the target name collides with some third folder (not the existing match), refuse.
@@ -1111,7 +1142,7 @@ def _apply_one(r: CompareResult, library_root: str) -> Tuple[bool, str]:
     return False, "unsupported keep value"
 
 
-def _apply_results(results: List[CompareResult], library_root: str) -> Tuple[int, int, int]:
+def _apply_results(results: List[CompareResult]) -> Tuple[int, int, int]:
     applied = 0
     skipped = 0
     errors = 0
@@ -1120,7 +1151,7 @@ def _apply_results(results: List[CompareResult], library_root: str) -> Tuple[int
             skipped += 1
             continue
         try:
-            ok, msg = _apply_one(r, library_root)
+            ok, msg = _apply_one(r)
         except Exception as e:
             errors += 1
             print(f"[APPLY-ERR] {r.key[0]}:{r.key[1]}: {e}")
@@ -1143,7 +1174,15 @@ def main() -> int:
         ),
     )
     ap.add_argument("--path-a", default=DEFAULT_NEW_PATH, help=f"New copies path (default: {DEFAULT_NEW_PATH})")
-    ap.add_argument("--path-b", default=DEFAULT_EXISTING_PATH, help=f"Existing library path (default: {DEFAULT_EXISTING_PATH})")
+    ap.add_argument(
+        "--path-b",
+        default=DEFAULT_EXISTING_PATH,
+        help=(
+            f"Existing library path(s) (default: {DEFAULT_EXISTING_PATH}). "
+            "Comma-separate multiple roots (e.g. /storage/media/movies,/storage/media/movies2) "
+            "to check newly downloaded movies against all of them at once."
+        ),
+    )
     ap.add_argument("--ssh-a", metavar="USER@HOST", default=None,
                     help="SSH host for path-a (e.g. david@192.168.33.40). Omit for local.")
     ap.add_argument("--ssh-b", metavar="USER@HOST", default=None,
@@ -1171,6 +1210,15 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # --apply executes local shutil.rmtree/move on the indexed paths; running it
+    # against paths that were enumerated over SSH would delete/move same-named
+    # LOCAL folders instead of the remote ones. Refuse the combination outright.
+    if args.apply and (args.ssh_a or args.ssh_b):
+        print("ERROR: --apply only supports local paths (it runs local filesystem "
+              "operations). Re-run without --ssh-a/--ssh-b on the host that owns "
+              "the libraries.", file=sys.stderr)
+        return 2
+
     # --apply is destructive and needs root (for chown via fix_media_perms and for moving into /storage/media/movies).
     if args.apply and os.geteuid() != 0:
         if shutil.which("sudo") is None:
@@ -1191,13 +1239,27 @@ def main() -> int:
         print(f"ERROR: missing required binaries: {', '.join(missing)}", file=sys.stderr)
         return 2
 
+    path_b_roots = [p.strip() for p in args.path_b.split(",") if p.strip()]
+
+    # An empty root is never a valid comparison input — it means a typo'd path,
+    # an unmounted dataset, or a failed SSH listing (list_subdirs swallows remote
+    # errors into an empty result). Proceeding would mislabel every EXISTING
+    # movie as net-new, and that output feeds radarr_upgrade_push.py, which
+    # would re-download the whole library. Abort instead.
+    for root, sh, side in [(args.path_a, shell_a, SIDE_NEW)] + [
+            (r, shell_b, SIDE_EXISTING) for r in path_b_roots]:
+        if not sh.list_subdirs(root):
+            print(f"ERROR: {side} root has no movie folders (missing path, empty "
+                  f"dataset, or failed SSH listing): {root}", file=sys.stderr)
+            return 2
+
     print("=== Compare Movie Libraries ===")
     print(f"{SIDE_NEW} path:      {args.path_a}  {'[SSH: ' + args.ssh_a + ']' if args.ssh_a else '[local]'}")
-    print(f"{SIDE_EXISTING} path: {args.path_b}  {'[SSH: ' + args.ssh_b + ']' if args.ssh_b else '[local]'}")
+    print(f"{SIDE_EXISTING} path: {', '.join(path_b_roots)}  {'[SSH: ' + args.ssh_b + ']' if args.ssh_b else '[local]'}")
     print()
 
     a_index, a_problems = index_library(args.path_a, SIDE_NEW, shell_a, threads=args.threads)
-    b_index, b_problems = index_library(args.path_b, SIDE_EXISTING, shell_b, threads=args.threads)
+    b_index, b_problems = index_libraries(path_b_roots, SIDE_EXISTING, shell_b, threads=args.threads)
     for p in a_problems + b_problems:
         print(p)
 
@@ -1323,12 +1385,14 @@ def main() -> int:
     w_conf = 6
     w_title = 38
     w_imdb = 10
+    w_root = 12
     header = (
         f"{'ACTION':<{w_action}}  "
         f"{'BASIS':<{w_basis}}  "
         f"{'CONF':<{w_conf}}  "
         f"{'TITLE':<{w_title}}  "
         f"{'IMDB':<{w_imdb}}  "
+        f"{'EXIST ROOT':<{w_root}}  "
         f"WHY"
     )
     print(header)
@@ -1337,6 +1401,9 @@ def main() -> int:
     for r in results_sorted:
         title = _fmt_identity(r.a_ent) if (r.a_ent.title and r.a_ent.year) else _fmt_identity(r.b_ent)
         imdb = r.a_ent.imdb or r.b_ent.imdb or ""
+        # Which EXISTING root this match actually lives under (e.g. movies vs movies2) —
+        # matters once path-b spans more than one root.
+        existing_root = os.path.basename(os.path.dirname(os.path.normpath(r.b_ent.folder)))
 
         action = "TIE" if r.keep == "TIE" else f"KEEP {r.keep}"
         basis = "-" if r.keep == "TIE" else r.basis
@@ -1353,6 +1420,7 @@ def main() -> int:
             f"{conf:<{w_conf}}  "
             f"{_truncate(title, w_title):<{w_title}}  "
             f"{_truncate(imdb, w_imdb):<{w_imdb}}  "
+            f"{_truncate(existing_root, w_root):<{w_root}}  "
             f"{why}"
         )
     print()
@@ -1366,8 +1434,8 @@ def main() -> int:
         else:
             for r in results:
                 print(f"--- {label_for(r.key, r.a_ent, r.b_ent)}")
-                print(f" {SIDE_NEW} folder: {os.path.basename(r.a_ent.folder)}")
-                print(f" {SIDE_EXISTING} folder: {os.path.basename(r.b_ent.folder)}")
+                print(f" {SIDE_NEW} folder: {os.path.normpath(r.a_ent.folder)}")
+                print(f" {SIDE_EXISTING} folder: {os.path.normpath(r.b_ent.folder)}")
 
                 if r.a_sum:
                     print(f" {SIDE_NEW} file: {os.path.basename(r.a_sum.mkv_path)}")
@@ -1413,7 +1481,7 @@ def main() -> int:
     _write_plan_file(
         plan_path,
         args.path_a,
-        args.path_b,
+        path_b_roots,
         only_a,
         a_index,
         results,
@@ -1426,7 +1494,7 @@ def main() -> int:
     if args.apply:
         print()
         print("=== APPLY (destructive) ===")
-        applied, skipped, errors = _apply_results(results, args.path_b)
+        applied, skipped, errors = _apply_results(results)
         print()
         print(f"Apply summary: applied={applied}  skipped={skipped}  errors={errors}")
         if errors:

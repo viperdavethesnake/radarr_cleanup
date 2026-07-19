@@ -104,6 +104,8 @@ def parse_all_imdb_ids(path: str) -> List[str]:
     """
     ids: List[str] = []
     seen: set = set()
+    low_conf_skipped = 0
+    saw_detail_section = False
 
     with open(path) as f:
         in_new_only = False
@@ -127,6 +129,7 @@ def parse_all_imdb_ids(path: str) -> List[str]:
             # Section 3: detailed comparison — KEEP NEW blocks
             if "=== 3) Movies present in BOTH" in line:
                 in_detail = True
+                saw_detail_section = True
                 continue
             if in_detail:
                 if line.startswith("--- "):
@@ -135,10 +138,25 @@ def parse_all_imdb_ids(path: str) -> List[str]:
                     if m:
                         current_imdb = m.group(1)
                 elif "RECOMMEND: KEEP NEW" in line and current_imdb:
-                    if current_imdb not in seen:
+                    # Only push high-confidence upgrades: compare's own --apply
+                    # requires confidence == high, and a Radarr add triggers an
+                    # immediate download — it should not be gated more loosely
+                    # than the local replace.
+                    cm = re.search(r"confidence=(\w+)", line)
+                    if cm and cm.group(1) != "high":
+                        low_conf_skipped += 1
+                    elif current_imdb not in seen:
                         ids.append(current_imdb)
                         seen.add(current_imdb)
                     current_imdb = None
+
+    if not saw_detail_section:
+        print("WARNING: compare output has no Section 3 detail blocks — "
+              "upgrade (KEEP NEW) candidates are only emitted when "
+              "compare_movie_copies.py runs with --details. Net-new only.")
+    if low_conf_skipped:
+        print(f"NOTE: skipped {low_conf_skipped} KEEP-NEW recommendation(s) "
+              f"below high confidence.")
 
     return ids
 
@@ -151,14 +169,20 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Add net-new and upgrade movies to Radarr with the 'Mine' profile."
     )
-    ap.add_argument("--dry-run", action="store_true", help="Preview only, no changes.")
+    ap.add_argument("--run", action="store_true",
+                    help="Actually add movies to Radarr and trigger searches. "
+                         "Without this flag the script previews only (dry run).")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Deprecated: dry run is now the default; this flag is a no-op.")
     ap.add_argument("--compare-output", default=COMPARE_OUTPUT,
                     help=f"Path to compare_movie_copies.py output (default: {COMPARE_OUTPUT})")
     args = ap.parse_args()
 
-    dry_run = args.dry_run
+    # Dry-run by default (maintenance convention: destructive ops require --run).
+    # Adding a movie to Radarr triggers an immediate Usenet search + download.
+    dry_run = not args.run
     if dry_run:
-        print("=== DRY RUN — no changes will be made ===\n")
+        print("=== DRY RUN — no changes will be made (pass --run to push) ===\n")
 
     imdb_ids = parse_all_imdb_ids(args.compare_output)
     print(f"Movies to add: {len(imdb_ids)}")

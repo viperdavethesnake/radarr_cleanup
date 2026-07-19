@@ -68,9 +68,10 @@ DEFAULT_SCAN_DIR = os.getenv('RC_VERIFY_SCAN_DIR', '/storage/media/movies')
 FFMPEG_BIN       = os.getenv('RC_FFMPEG_BIN', 'ffmpeg')
 FFPROBE_BIN      = os.getenv('RC_FFPROBE_BIN', 'ffprobe')
 
-# 5 parallel ffmpeg processes × 4 threads each = 20 of 28 cores.
-# Leaves 8 cores for Jellyfin (demux / audio / subs around NVENC) + OS.
-DEFAULT_WORKERS  = 5
+# 3 parallel ffmpeg processes × 4 threads each = 12 of 20 logical cores on
+# the i7-12700KF. Leaves headroom for Jellyfin (demux / audio / subs around
+# NVENC), Frigate, Ollama + OS. Matches the docstring and CLAUDE.md.
+DEFAULT_WORKERS  = 3
 DEFAULT_THREADS  = 4
 
 # Absolute per-file wallclock cap. Real-world worst-case is a 4-hour 4K HEVC
@@ -431,9 +432,11 @@ def main() -> int:
                     help=f'ffmpeg -threads per process (default {DEFAULT_THREADS})')
     ap.add_argument('--limit', type=int, default=0,
                     help='Process only the first N MKVs (for testing)')
-    ap.add_argument('--resume', metavar='JSONL',
+    ap.add_argument('--resume', metavar='JSONL', action='append',
                     help='Skip MKVs already recorded in this prior JSONL '
-                         '(OK/ERRORS/TIMEOUT skipped; FAILED/INTERRUPTED retried)')
+                         '(OK/ERRORS/TIMEOUT skipped; FAILED/INTERRUPTED retried). '
+                         'Repeatable — after multiple interruptions, pass every '
+                         'prior JSONL so all completed files are skipped.')
     args = ap.parse_args()
 
     scan_dir = Path(args.scan_dir)
@@ -446,25 +449,28 @@ def main() -> int:
 
     skipped_by_resume = 0
     if args.resume:
-        resume_path = Path(args.resume)
-        if not resume_path.is_file():
-            print(f'ERROR: --resume file not found: {resume_path}', file=sys.stderr)
-            return 1
         skip_paths: set[str] = set()
         skip_statuses = {'OK', 'ERRORS', 'TIMEOUT'}
-        with open(resume_path, encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get('status') in skip_statuses and rec.get('path'):
-                    skip_paths.add(rec['path'])
+        for resume_file in args.resume:
+            resume_path = Path(resume_file)
+            if not resume_path.is_file():
+                print(f'ERROR: --resume file not found: {resume_path}', file=sys.stderr)
+                return 1
+            with open(resume_path, encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get('status') in skip_statuses and rec.get('path'):
+                        # Normalize so a relative-vs-absolute scan_dir spelling
+                        # between runs still matches.
+                        skip_paths.add(str(Path(rec['path']).resolve()))
         before = len(mkvs)
-        mkvs = [m for m in mkvs if str(m) not in skip_paths]
+        mkvs = [m for m in mkvs if str(m.resolve()) not in skip_paths]
         skipped_by_resume = before - len(mkvs)
 
     if args.limit > 0:
@@ -472,7 +478,7 @@ def main() -> int:
 
     if not mkvs:
         if skipped_by_resume:
-            print(f'No remaining MKVs — {skipped_by_resume} already completed in {args.resume}')
+            print(f'No remaining MKVs — {skipped_by_resume} already completed in {", ".join(args.resume)}')
         else:
             print(f'No MKVs found in {scan_dir}')
         return 0
@@ -488,7 +494,7 @@ def main() -> int:
     log.msg(f'Decode-integrity audit starting')
     log.msg(f'  scan_dir = {scan_dir}')
     if args.resume:
-        log.msg(f'  resume   = {args.resume}  (skipping {skipped_by_resume} '
+        log.msg(f'  resume   = {", ".join(args.resume)}  (skipping {skipped_by_resume} '
                 f'of {total_before_resume} already-completed)')
     log.msg(f'  files    = {len(mkvs)}')
     log.msg(f'  workers  = {args.workers} × threads {args.threads} '
