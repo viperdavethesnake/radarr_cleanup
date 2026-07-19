@@ -39,7 +39,7 @@ cd movie_analyzer && ./nvidia_av1_benchmark.py
 ./quality_analyzer.py -r results/*.json --plot --report
 ```
 
-There are no automated tests. Use the helper scripts in `movie_cleanup/helpers/` and `tv_cleanup/helpers/` to spot-check and debug (e.g., `peek_mkvinfo.py`, `spot_check_movies.py`, `verify_mkv_cleanup.py`).
+There are no automated tests. Use the helper scripts in `movie_cleanup/helpers/` to spot-check and debug (e.g., `peek_mkvinfo.py`, `spot_check_movies.py`). The old `tv_cleanup/helpers/` (hardcoded single-show migration scripts) was deleted 2026-07; recover from git history if ever needed.
 
 ## Configuration
 
@@ -184,7 +184,7 @@ POST /api/v3/command
 
 ```
 movie_cleanup/      Main movie pipeline + helpers/
-tv_cleanup/         Main TV pipeline + helpers/
+tv_cleanup/         Main TV pipeline
 movie_analyzer/     AV1 GPU benchmarking and quality analysis
 maintenance/        Read-only reporting and permission tools
 ```

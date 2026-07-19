@@ -49,16 +49,6 @@ Supported runtime: Python 3.13/3.14.
 - Only deletes original if ALL episodes succeed
 - Moves failed shows to `./failed_tv/`
 
-### Helper Scripts (`helpers/`)
-Additional utilities for TV show management:
-- `cleanup_and_consolidate.py`: Consolidate scattered files
-- `fix_mkv_tags.py`: Fix metadata tags in MKV files
-- `organize_tv_folders.py`: Organize raw files into season folders
-- `simple_mkv_tags.py`: Simple tag injection
-- `tv_cleanup_inplace.py`: In-place cleanup (use with caution)
-- `tv_episode_cleaner.py`: Clean individual episode files
-- `verify_mkv_cleanup.py`: Verify cleanup results
-
 ## Usage
 
 ### Step 1: Batch Clean
