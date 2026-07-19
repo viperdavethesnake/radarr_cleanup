@@ -151,6 +151,10 @@ def _expand_roots(paths: List[str]) -> List[str]:
         p = os.path.abspath(p)
         if p in ("/", ""):
             raise SystemExit("Refusing to run on '/'. Provide specific media paths.")
+        # This script chowns/chmods recursively as root — restrict it to the
+        # media tree so a stray argument (e.g. /etc) can't be clobbered.
+        if p != BASE and not p.startswith(BASE.rstrip("/") + os.sep):
+            raise SystemExit(f"Refusing to run outside {BASE} (RC_MEDIA_BASE): {p}")
 
         if p == BASE:
             try:

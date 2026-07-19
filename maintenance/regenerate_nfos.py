@@ -465,7 +465,7 @@ def main() -> int:
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(process_folder, f, sd, dry_run): f
+            pool.submit(process_folder, f, sd, dry_run): (f, sd)
             for f, sd in folders
         }
         try:
@@ -487,7 +487,14 @@ def main() -> int:
                     for i in r.issues:
                         log(f"      ❌ {i}")
                 except Exception as e:
-                    log(f"  💥 Worker error: {e}")
+                    # Record the failure so it appears in the summary/exports
+                    # and the exit code — a bare log line here silently drops
+                    # the folder from the report (errors must accumulate).
+                    folder, scan_dir = futures[future]
+                    results.append(FolderResult(
+                        folder=os.path.basename(folder), scan_dir=scan_dir,
+                        status="FAIL", issues=[f"worker error: {e}"]))
+                    log(f"  💥 Worker error in {os.path.basename(folder)}: {e}")
         except KeyboardInterrupt:
             log("⚠️  Interrupted.")
 

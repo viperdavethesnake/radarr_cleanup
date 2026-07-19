@@ -60,21 +60,6 @@ def timed(msg, func, *args, **kwargs):
 def fast_copy(src, dst):
     subprocess.run(['cp', '--reflink=auto', src, dst], check=True, timeout=300)
 
-def convert_mp4_to_mkv(src, dst):
-    cmd = [
-        'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
-        '-i', src,
-        '-map', '0:v', '-map', '0:a',
-        '-c', 'copy',
-        '-map_chapters', '-1',
-        dst,
-    ]
-    try:
-        subprocess.run(cmd, check=True, timeout=600, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        log(f"  [ERR] ffmpeg failed: {(e.stderr or '').strip()[:500]}")
-        raise
-
 def find_imdbid(folder, filename):
     # Radarr's naming template embeds [imdbid-tt...] directly in the file.
     if filename:
@@ -104,10 +89,19 @@ def find_imdbid(folder, filename):
 
     return None
 
+def _tmdb_get(url):
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp
+    except requests.RequestException as e:
+        # requests error messages embed the full URL (api_key included) and
+        # would otherwise land verbatim in the debug log. Redact the key.
+        raise Exception(str(e).replace(TMDB_API_KEY, '<TMDB_API_KEY>')) from None
+
 def fetch_tmdb_metadata(imdbid):
     url = f'https://api.themoviedb.org/3/find/{imdbid}?api_key={TMDB_API_KEY}&external_source=imdb_id'
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
+    resp = _tmdb_get(url)
     data = resp.json()
     # Movie results only: TMDB movie and TV ids are independent namespaces, so
     # feeding a tv_results id to the /movie/ endpoint can bind the file to a
@@ -119,9 +113,7 @@ def fetch_tmdb_metadata(imdbid):
                         + (" (matched a TV entry — not a movie)" if data.get('tv_results') else ""))
     tmdb_id = movie_results[0]['id']
     url = f'https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={TMDB_API_KEY}&append_to_response=credits,belongs_to_collection,release_dates'
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    meta = resp.json()
+    meta = _tmdb_get(url).json()
     poster_url = 'https://image.tmdb.org/t/p/original' + meta['poster_path'] if meta.get('poster_path') else ''
     fanart_url = 'https://image.tmdb.org/t/p/original' + meta['backdrop_path'] if meta.get('backdrop_path') else ''
     return meta, poster_url, fanart_url
@@ -181,7 +173,7 @@ def write_tags_xml(meta, imdbid, dest):
 
     tags_data = [
         ("TITLE", meta.get("title") or meta.get("name")),
-        ("YEAR", str(meta.get("release_date", "")[:4])),
+        ("YEAR", (meta.get('release_date') or '')[:4]),
         ("DIRECTOR", next((c['name'] for c in meta.get('credits', {}).get('crew', []) if c.get('job') == 'Director'), "")),
         ("GENRE", ", ".join([g['name'] for g in meta.get('genres', [])])),
         ("IMDB", imdbid),
@@ -223,14 +215,14 @@ def write_nfo(meta, imdbid, dest):
     safe_sub(root, 'originaltitle', meta.get('original_title'))
     if title:
         safe_sub(root, 'sorttitle', sort_title(title))
-    safe_sub(root, 'year', meta.get('release_date', '')[:4])
+    safe_sub(root, 'year', (meta.get('release_date') or '')[:4])
     safe_sub(root, 'premiered', meta.get('release_date'))
     safe_sub(root, 'plot', meta.get('overview'))
     safe_sub(root, 'tagline', meta.get('tagline'))
-    safe_sub(root, 'runtime', str(meta.get('runtime', '')))
+    safe_sub(root, 'runtime', str(meta.get('runtime') or ''))
     safe_sub(root, 'mpaa', pick_us_certification(meta))
-    safe_sub(root, 'rating', str(meta.get('vote_average', '')))
-    safe_sub(root, 'votes', str(meta.get('vote_count', '')))
+    safe_sub(root, 'rating', str(meta.get('vote_average') or ''))
+    safe_sub(root, 'votes', str(meta.get('vote_count') or ''))
     safe_sub(root, 'tmdbid', str(meta.get('id')))
     safe_sub(root, 'imdbid', imdbid)
 
@@ -282,7 +274,7 @@ def _normalize_title_for_path(title):
 
 def clean_folder_name(meta):
     title = meta.get('title') or meta.get('name') or "Unknown"
-    year = meta.get('release_date', '')[:4]
+    year = (meta.get('release_date') or '')[:4]
     safe_title = _normalize_title_for_path(title)
     if year:
         return f"{safe_title}_({year})"
@@ -290,7 +282,7 @@ def clean_folder_name(meta):
 
 def clean_file_name(meta, ext):
     title = meta.get('title') or meta.get('name') or "Unknown"
-    year = meta.get('release_date', '')[:4]
+    year = (meta.get('release_date') or '')[:4]
     safe_title = _normalize_title_for_path(title)
     if year:
         return f"{safe_title}_({year}){ext}"
@@ -299,19 +291,25 @@ def clean_file_name(meta, ext):
 def _move_to_failed(src_folder, base):
     failed = os.path.join(FAILED_DIR, base)
     try:
+        # A leftover failed/<base> from a prior run would make shutil.move
+        # nest the folder inside it (failed/Base/Base). Replace it instead.
+        if os.path.exists(failed):
+            shutil.rmtree(failed, ignore_errors=True)
         shutil.move(src_folder, failed)
         log(f"  [FAILED] Moved to failed directory: {failed}")
     except Exception as e:
         log(f"❌ Could not move to failed: {e}")
 
-def _delete_junk_nfos(folder):
-    for f in os.listdir(folder):
-        if f.lower().endswith('.nfo') and f != 'movie.nfo':
-            try:
-                os.remove(os.path.join(folder, f))
-                log(f"  [NFO] Deleted junk scene NFO: {f}")
-            except Exception as e:
-                log(f"  [WARN] Could not delete scene NFO: {f}: {e}")
+def _move_to_review(src_folder, base):
+    review = os.path.join(REVIEW_DIR, base)
+    try:
+        if os.path.exists(review):
+            log(f"  [REVIEW] Target already exists: {review} — leaving source in place")
+            return
+        shutil.move(src_folder, review)
+        log(f"  [REVIEW] Moved to review directory: {review}")
+    except Exception as e:
+        log(f"❌ Could not move to review: {e}")
 
 # Destination folders claimed this run (dedupe guard across workers).
 _claim_lock = threading.Lock()
@@ -332,9 +330,7 @@ def clean_folder(src_folder):
 
         if len(videos) > 1:
             log(f"[REVIEW] {len(videos)} video files in {base} — needs human review")
-            review_target = os.path.join(REVIEW_DIR, base)
-            shutil.move(src_folder, review_target)
-            log(f"  [REVIEW] Moved to: {review_target}")
+            _move_to_review(src_folder, base)
             return
 
         if not videos:
@@ -380,7 +376,7 @@ def clean_folder(src_folder):
             if dst_folder in _claimed_dsts:
                 log(f"[REVIEW] {base}: duplicate of an in-flight/processed title "
                     f"({new_base}) — needs human review")
-                shutil.move(src_folder, os.path.join(REVIEW_DIR, base))
+                _move_to_review(src_folder, base)
                 return
             _claimed_dsts.add(dst_folder)
 

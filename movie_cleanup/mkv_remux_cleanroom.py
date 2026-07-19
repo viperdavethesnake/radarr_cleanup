@@ -3,29 +3,12 @@
 import os, sys, shutil, subprocess, json, time, traceback, re, signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from batch_cleaner import (
-    find_imdbid, fetch_tmdb_metadata,
-    write_json, write_tags_xml, write_nfo,
-    download_image, _delete_junk_nfos,
-)
-
 TAGGED_DIR = './tagged'
 CLEANED_DIR = './cleaned'
 REVIEW_DIR = './review'
 FAILED_DIR = './failed'
 LOG_DIR = './logs'
 MAX_WORKERS = 4
-
-# ISO 639-1 → 639-2/B (TMDB returns 639-1; MKV/Matroska tracks use 639-2/B).
-ISO_1_TO_2 = {
-    'it': 'ita', 'de': 'ger', 'fr': 'fre', 'es': 'spa', 'ja': 'jpn',
-    'ko': 'kor', 'zh': 'chi', 'pt': 'por', 'ru': 'rus', 'nl': 'dut',
-    'sv': 'swe', 'no': 'nor', 'da': 'dan', 'fi': 'fin', 'pl': 'pol',
-    'tr': 'tur', 'ar': 'ara', 'hi': 'hin', 'th': 'tha', 'el': 'gre',
-    'he': 'heb', 'cs': 'cze', 'hu': 'hun', 'ro': 'rum', 'uk': 'ukr',
-    'vi': 'vie', 'id': 'ind', 'ms': 'may', 'en': 'eng',
-}
 
 shutdown_requested = False
 
@@ -93,9 +76,8 @@ def is_sub_junk(track):
         or 'sdh' in name_low
         or 'hearing' in name_low
         or 'impaired' in name_low
-        or 'hi ' in name_low
-        or 'hi-' in name_low
-        or 'hi/' in name_low
+        or re.search(r'\bhi\b', name_low)   # word-boundary: catches "English (HI)"
+                                              # without excluding e.g. "Sushi Party"
         or 'forced' in name_low
         or props.get('flag_commentary')
         or props.get('flag_hearing_impaired')
@@ -180,15 +162,28 @@ def _normalize_title_for_path(title):
     safe = re.sub(r'_+', '_', safe).strip('_')
     return safe
 
+def res_class(dims):
+    """Standard resolution class from 'WxH' pixel dimensions.
+
+    Classify by width first: cropped scope releases (3840x1608, 1920x800)
+    must read 2160/1080, not their raw pixel height.
+    """
+    try:
+        w, h = (int(x) for x in dims.lower().split('x'))
+    except (ValueError, AttributeError):
+        return 'unknown'
+    if w >= 3200 or h >= 1600: return '2160'
+    if w >= 1800 or h >= 900:  return '1080'
+    if w >= 1100 or h >= 600:  return '720'
+    return '480'
+
 def enhanced_file_name(meta, video_track, audio_track, ext='.mkv'):
     title = meta.get('title', 'Unknown')
-    year = meta.get('release_date', '')[:4]
+    year = (meta.get('release_date') or '')[:4]
     safe_title = _normalize_title_for_path(title)
 
     v_props = (video_track or {}).get('properties') or {}
-
-    dims = v_props.get('pixel_dimensions') or ''
-    height = dims.split('x')[-1] if 'x' in dims else 'unknown'
+    height = res_class(v_props.get('pixel_dimensions') or '')
 
     v_codec = track_codec_short(video_track or {})
     a_codec = track_codec_short(audio_track or {})

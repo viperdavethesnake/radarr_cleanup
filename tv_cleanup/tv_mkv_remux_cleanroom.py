@@ -85,9 +85,8 @@ def is_sub_junk(track):
         or 'sdh' in name_low
         or 'hearing' in name_low
         or 'impaired' in name_low
-        or 'hi ' in name_low
-        or 'hi-' in name_low
-        or 'hi/' in name_low
+        or re.search(r'\bhi\b', name_low)   # word-boundary: catches "English (HI)"
+                                              # without excluding e.g. "Sushi Party"
         or 'forced' in name_low
         or props.get('flag_commentary')
         or props.get('flag_hearing_impaired')
@@ -175,12 +174,26 @@ def pick_best_subtitle(tracks):
     return srt[0] if srt else valid[0]
 
 
+def res_class(dims):
+    """Standard resolution class from 'WxH' pixel dimensions.
+
+    Classify by width first: cropped scope releases (3840x1608, 1920x800)
+    must read 2160/1080, not their raw pixel height.
+    """
+    try:
+        w, h = (int(x) for x in dims.lower().split('x'))
+    except (ValueError, AttributeError):
+        return 'unknown'
+    if w >= 3200 or h >= 1600: return '2160'
+    if w >= 1800 or h >= 900:  return '1080'
+    if w >= 1100 or h >= 600:  return '720'
+    return '480'
+
+
 def enhanced_episode_name(stem, video_track, audio_track, ext='.mkv'):
     """stem: filename without extension, e.g. 'Show_S01E01_Title'."""
     v_props = (video_track or {}).get('properties') or {}
-
-    dims = v_props.get('pixel_dimensions') or ''
-    height = dims.split('x')[-1] if 'x' in dims else 'unknown'
+    height = res_class(v_props.get('pixel_dimensions') or '')
 
     v_codec = track_codec_short(video_track or {})
     a_codec = track_codec_short(audio_track or {})
@@ -227,16 +240,6 @@ def _move_episode_to_review(src_mkv, show_base, season_dir):
         log(f"  [REVIEW] Moved to: {review_target}")
     except Exception as e:
         log(f"❌ Could not move to review: {e}")
-
-
-def _episode_dst_name(src_mkv, tracks):
-    """Compute the with-codec-suffix output filename for a given source MKV."""
-    stem, _ = os.path.splitext(os.path.basename(src_mkv))
-    video_tracks = [t for t in tracks if t['type'] == 'video']
-    if not video_tracks:
-        return stem + '.mkv'
-    audio = pick_best_audio(tracks)
-    return enhanced_episode_name(stem, video_tracks[0], audio, '.mkv')
 
 
 def _container_duration_s(info):

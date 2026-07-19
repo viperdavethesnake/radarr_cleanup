@@ -336,7 +336,9 @@ def move_bad_folders(results: List[FolderAudit], dest_root: str) -> Tuple[int, L
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Audit existing movie/documentary libraries (print-only).")
+    ap = argparse.ArgumentParser(
+        description="Audit existing movie/documentary libraries "
+                    "(read-only by default; --move-bad relocates flagged folders).")
     ap.add_argument("--movies-dir", default=DEFAULT_MOVIES_DIR, help=f"Movies root (default: {DEFAULT_MOVIES_DIR})")
     ap.add_argument("--docs-dir", default=DEFAULT_DOCS_DIR, help=f"Documentaries root (default: {DEFAULT_DOCS_DIR})")
     ap.add_argument("--deep", action="store_true", help="Also run mkvmerge -J checks on single-MKV folders.")
@@ -354,7 +356,7 @@ def main() -> int:
     ap.add_argument(
         "--move-bad",
         action="store_true",
-        help=f"Move folders with issues to --move-dest (default: {DEFAULT_MOVE_DEST}).",
+        help=f"DESTRUCTIVE: move folders with issues to --move-dest (default: {DEFAULT_MOVE_DEST}).",
     )
     ap.add_argument(
         "--move-dest",

@@ -68,22 +68,6 @@ def fast_copy(src, dst):
     subprocess.run(['cp', '--reflink=auto', src, dst], check=True, timeout=600)
 
 
-def convert_mp4_to_mkv(src, dst):
-    cmd = [
-        'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
-        '-i', src,
-        '-map', '0:v', '-map', '0:a',
-        '-c', 'copy',
-        '-map_chapters', '-1',
-        dst,
-    ]
-    try:
-        subprocess.run(cmd, check=True, timeout=900, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        log(f"  [ERR] ffmpeg failed: {(e.stderr or '').strip()[:500]}")
-        raise
-
-
 def find_show_id(folder):
     """Return (kind, id) where kind is 'tvdb' or 'imdb'. Sonarr embeds [tvdbid-N] in folder names."""
     base = os.path.basename(folder)
@@ -112,14 +96,24 @@ def find_show_id(folder):
     return (None, None)
 
 
+def _tmdb_get(url, **kw):
+    try:
+        resp = requests.get(url, timeout=30, **kw)
+        if resp.status_code != 404:
+            resp.raise_for_status()
+        return resp
+    except requests.RequestException as e:
+        # requests error messages embed the full URL (api_key included) and
+        # would otherwise land verbatim in the debug log. Redact the key.
+        raise Exception(str(e).replace(TMDB_API_KEY, '<TMDB_API_KEY>')) from None
+
+
 def fetch_tmdb_show(kind, ext_id):
     """Look up show by TVDB or IMDb id; return (meta, poster_url, fanart_url, imdb_id, tvdb_id)."""
     src_param = 'tvdb_id' if kind == 'tvdb' else 'imdb_id'
     url = (f'https://api.themoviedb.org/3/find/{ext_id}'
            f'?api_key={TMDB_API_KEY}&external_source={src_param}')
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    data = _tmdb_get(url).json()
     results = data.get('tv_results') or []
     if not results:
         raise Exception(f"TMDB lookup failed for {kind}={ext_id}")
@@ -127,9 +121,7 @@ def fetch_tmdb_show(kind, ext_id):
 
     url = (f'https://api.themoviedb.org/3/tv/{tmdb_id}'
            f'?api_key={TMDB_API_KEY}&append_to_response=credits,external_ids,content_ratings')
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    meta = resp.json()
+    meta = _tmdb_get(url).json()
 
     ext = meta.get('external_ids') or {}
     imdb_id = ext.get('imdb_id') or (ext_id if kind == 'imdb' else None)
@@ -144,10 +136,9 @@ def fetch_tmdb_show(kind, ext_id):
 def fetch_tmdb_season(tmdb_id, season_num):
     url = (f'https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_num}'
            f'?api_key={TMDB_API_KEY}')
-    resp = requests.get(url, timeout=30)
+    resp = _tmdb_get(url)
     if resp.status_code == 404:
         return None
-    resp.raise_for_status()
     return resp.json()
 
 
@@ -234,8 +225,8 @@ def write_tvshow_nfo(meta, imdb_id, tvdb_id, dest):
     if runtime:
         safe_sub(root, 'runtime', str(runtime[0]))
     safe_sub(root, 'mpaa', pick_us_content_rating(meta))
-    safe_sub(root, 'rating', str(meta.get('vote_average', '')))
-    safe_sub(root, 'votes', str(meta.get('vote_count', '')))
+    safe_sub(root, 'rating', str(meta.get('vote_average') or ''))
+    safe_sub(root, 'votes', str(meta.get('vote_count') or ''))
     safe_sub(root, 'tmdbid', str(meta.get('id')))
     safe_sub(root, 'imdbid', imdb_id)
 
@@ -290,8 +281,8 @@ def write_episode_nfo(show_meta, ep_meta, imdb_id, tvdb_id, season_num, episode_
     safe_sub(root, 'aired', ep_meta.get('air_date'))
     if ep_meta.get('runtime'):
         safe_sub(root, 'runtime', str(ep_meta['runtime']))
-    safe_sub(root, 'rating', str(ep_meta.get('vote_average', '')))
-    safe_sub(root, 'votes', str(ep_meta.get('vote_count', '')))
+    safe_sub(root, 'rating', str(ep_meta.get('vote_average') or ''))
+    safe_sub(root, 'votes', str(ep_meta.get('vote_count') or ''))
 
     if ep_meta.get('id'):
         uid = SubElement(root, 'uniqueid')
@@ -538,11 +529,16 @@ def clean_show_folder(src_folder):
                         f"(truncated or untagged); redoing: {ep_filename}")
                     os.remove(dst_mkv)
 
+                # MP4 is not an accepted source container (parity with the
+                # movie pipeline; the old ffmpeg conversion also silently
+                # dropped every subtitle track).
+                if not vpath.lower().endswith('.mkv'):
+                    log(f"  [WARN] MP4 source not accepted: {fname} — needs manual handling")
+                    ep_failed += 1
+                    continue
+
                 try:
-                    if vpath.lower().endswith('.mkv'):
-                        timed(f"Copy MKV: {fname} → {ep_filename}", fast_copy, vpath, dst_mkv)
-                    else:
-                        timed(f"Convert MP4→MKV: {fname} → {ep_filename}", convert_mp4_to_mkv, vpath, dst_mkv)
+                    timed(f"Copy MKV: {fname} → {ep_filename}", fast_copy, vpath, dst_mkv)
 
                     timed(f"Strip attachments: {ep_filename}", strip_attachments, dst_mkv)
 
