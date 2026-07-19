@@ -2,7 +2,7 @@
 
 **Author:** ViperDavetheSnake (microbarley@gmail.com)
 
-A sophisticated Python 3.13+ pipeline for processing and cleaning MKV files with comprehensive metadata extraction and optimal track selection. This project transforms raw downloaded movies into clean, Jellyfin-ready MKV files with proper metadata, optimal track selection, and file organization.
+A Python 3.14 pipeline for processing and cleaning MKV files with comprehensive metadata extraction and optimal track selection. This project transforms raw downloaded movies into clean, Jellyfin-ready MKV files with proper metadata, optimal track selection, and file organization.
 
 ## 🎯 Overview
 
@@ -29,14 +29,18 @@ movie_cleanup/
 ├── movies/                   # Raw downloaded movies (input)
 ├── tagged/                   # MKVs with TMDB metadata and tags
 ├── cleaned/                  # Final Jellyfin-ready MKV files
-├── failed/                   # Failed processing attempts
+├── failed/                   # Failed processing attempts (incl. foreign-original films)
+├── review/                   # Cases needing human review (multi-video, no acceptable audio)
 ├── logs/                     # Processing logs and debug info
-├── helpers/                  # Utility scripts for debugging
-│   ├── peek_mkvinfo.py      # Quick MKV structure inspection
-│   ├── show_sample_tags.py  # Display generated tags XML
-│   └── scan_nfo_for_imdb.py # Scan NFO files for IMDb IDs
-└── foreign/                  # Foreign language movies (optional)
+└── helpers/                  # Utility scripts for debugging
+    ├── peek_mkvinfo.py      # Quick MKV structure inspection
+    ├── show_sample_tags.py  # Display generated tags XML
+    └── scan_nfo_for_imdb.py # Scan NFO files for IMDb IDs
 ```
+
+Foreign-original films (TMDB `original_language != 'en'`) are **not handled by
+this pipeline** — batch_cleaner routes them to `./failed/`; they are managed by
+separate scripts / manual processes.
 
 ## 🛠️ Scripts Overview
 
@@ -44,20 +48,20 @@ movie_cleanup/
 
 #### `batch_cleaner.py` - TMDB Metadata Processor
 - **Purpose**: Downloads metadata from TMDB and applies clean tags to MKV files
-- **Workers**: 12 concurrent threads (optimized for your 28-core system)
+- **Workers**: 4 concurrent threads (storage-bound — see CLAUDE.md concurrency notes)
 - **Features**:
   - TMDB API integration for rich metadata
   - Downloads high-quality movie posters
   - Strips existing tags and attachments
-  - Renames files to clean format: `Movie Title (Year).mkv`
+  - Renames files to clean format: `Movie_Title_(Year).mkv`
   - Generates complete NFO files for Jellyfin
   - Graceful shutdown handling
 
 #### `mkv_remux_cleanroom.py` - Track Optimizer
 - **Purpose**: Creates clean MKV files with optimal track selection
-- **Workers**: 8 concurrent threads (balanced for I/O performance)
+- **Workers**: 4 concurrent threads (storage-bound — see CLAUDE.md concurrency notes)
 - **Features**:
-  - Smart audio track selection (TrueHD → DTS-HD → DTS → AC3 → EAC3 → AAC)
+  - Smart audio track selection (TrueHD → DTS-HD → DTS → EAC3 → AC3 → FLAC → AAC → MP3)
   - English-only audio filtering with commentary exclusion
   - Intelligent subtitle selection (SRT preferred, excludes SDH/forced)
   - Removes chapters and attachments for clean output
@@ -65,21 +69,12 @@ movie_cleanup/
 
 #### `verify_movies.py` - Jellyfin Compatibility Checker
 - **Purpose**: Validates processed movies for Jellyfin readiness
-- **Workers**: 12 concurrent threads (optimized for read operations)
 - **Features**:
   - Comprehensive MKV structure analysis
   - NFO file validation (essential elements check)
   - Folder naming convention verification
   - Detailed reporting with pass/fail/warning status
   - JSON export for detailed analysis
-
-#### `foreign_post_processor.py` - Foreign Language Processor
-- **Purpose**: Processes foreign language movies with language tag standardization
-- **Workers**: 12 concurrent threads
-- **Features**:
-  - IETF BCP 47 language code standardization
-  - Metadata validation and cleanup
-  - Simple copy operation for pre-processed foreign films
 
 ### Utility Scripts (helpers/)
 
@@ -121,7 +116,6 @@ Use env vars when server paths differ:
 
 ```bash
 export RC_VERIFY_SCAN_DIR="/storage/media/movies"
-export RC_FOREIGN_DIR="/storage/media/servarr/foreign"
 export RC_CLEANED_DIR="/storage/media/servarr/cleaned"
 ```
 
@@ -152,20 +146,17 @@ python3 verify_movies.py --scan-dir ./cleaned
 
 ### Individual Script Usage
 ```bash
-# Batch processing with custom thread count
-python3 batch_cleaner.py  # Uses 12 workers by default
+# Batch processing
+python3 batch_cleaner.py  # 4 workers, fixed
 
-# Remuxing with custom settings
-python3 mkv_remux_cleanroom.py  # Uses 8 workers by default
+# Remuxing
+python3 mkv_remux_cleanroom.py  # 4 workers, fixed
 
 # Verification with different directory
 python3 verify_movies.py --scan-dir /path/to/movies --threads 16
 
 # Save verification results to JSON
 python3 verify_movies.py --output results.json
-
-# Foreign language post-processing
-python3 foreign_post_processor.py
 ```
 
 ### Utility Usage
@@ -181,12 +172,13 @@ python3 helpers/scan_nfo_for_imdb.py
 ### Audio Track Priority
 The system selects audio tracks in this order:
 1. **TrueHD** (highest quality)
-2. **DTS-HD Master Audio**
-3. **DTS-HD High Resolution**
-4. **DTS**
+2. **DTS-HD** (Master Audio / High Resolution)
+3. **DTS**
+4. **EAC3** (Dolby Digital Plus)
 5. **AC3** (Dolby Digital)
-6. **EAC3** (Dolby Digital Plus)
-7. **AAC** (lowest priority)
+6. **FLAC**
+7. **AAC**
+8. **MP3** (lowest priority)
 
 ### Track Filtering Rules
 - **Audio**: English only, excludes commentary, director interviews
@@ -195,20 +187,18 @@ The system selects audio tracks in this order:
 
 ### File Naming Convention
 ```
-Movie_Title_(Year)_imdbid.mkv
+Movie_Title_(Year)_[2160p_hevc_eac3].mkv    inside    Movie_Title_(Year)/
 ```
 - Special characters removed except spaces, hyphens, parentheses, ampersands
 - Spaces replaced with underscores
-- IMDB ID appended for uniqueness
+- Technical suffix added at remux; the IMDb ID lives in the embedded MKV tags, not the filename
 
 ## 🔧 Advanced Features
 
 ### Concurrent Processing
-- **Optimized for 28-core systems** with intelligent worker allocation
-- `batch_cleaner.py`: 12 workers (I/O + network bound)
-- `mkv_remux_cleanroom.py`: 8 workers (I/O intensive)
-- `verify_movies.py`: 12 workers (read operations)
-- `foreign_post_processor.py`: 12 workers (file operations)
+- `batch_cleaner.py` and `mkv_remux_cleanroom.py`: **4 workers, fixed** — both
+  stages are storage-bound against the shared ZFS pool; more workers make them
+  slower, not faster (see CLAUDE.md for the full rationale and incident history)
 - Graceful shutdown handling with signal management
 
 ### Error Handling

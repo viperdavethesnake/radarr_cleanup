@@ -65,7 +65,7 @@ Python packages: `requests`, `python-dotenv`, `numpy`, `matplotlib` (see `requir
 
 ## Architecture
 
-**Concurrency**: All major scripts use `ThreadPoolExecutor`. Worker counts are tuned per workload: 8 for network-bound (TMDB metadata), 4 for the remux stage (`MAX_WORKERS` in **both** `mkv_remux_cleanroom.py` and `tv_mkv_remux_cleanroom.py`). The remux stage is **storage-bound, not CPU-bound** — each `mkvmerge` is a demux/remux of a 40–90 GB file, so the bottleneck is ZFS pool bandwidth, not cores. Running too many in parallel splits that one pool N ways, collapses per-job throughput, and trips the 1800s per-job timeout (this happened at 12-way: 9 of 16 jobs timed out and landed in `./failed/`). Keep both at 4 so each job gets enough bandwidth to finish well under the timeout and leaves I/O headroom for co-resident Jellyfin/Frigate/Ollama. More threads do **not** make remux faster here. Scripts register `SIGINT`/`SIGTERM` handlers for graceful shutdown.
+**Concurrency**: All major scripts use `ThreadPoolExecutor`, `MAX_WORKERS = 4` in `batch_cleaner.py`, `mkv_remux_cleanroom.py`, and `tv_mkv_remux_cleanroom.py`. Despite the TMDB-lookup stage being network-bound, `batch_cleaner.py` also does local file I/O per movie (`fast_copy` into `./tagged`, `mkvmerge -J` metadata reads) against the same ZFS pool used by the remux stage, Jellyfin, Frigate, and Ollama — so it's storage-bound too, not just network-bound (originally ran at 8 workers; dropped to 4 in 2026-07 after concurrent `fast_copy`s of several 40+ GB Remux files saturated the pool and stalled an unrelated `mkvmerge -J` metadata read past its timeout). The remux stage is **storage-bound, not CPU-bound** — each `mkvmerge` is a demux/remux of a 40–90 GB file, so the bottleneck is ZFS pool bandwidth, not cores. Running too many in parallel splits that one pool N ways, collapses per-job throughput, and trips the per-job timeout (this happened at 12-way: 9 of 16 jobs timed out and landed in `./failed/`). Keep all three at 4 so each job gets enough bandwidth to finish well under timeout and leaves I/O headroom for co-resident Jellyfin/Frigate/Ollama. More threads do **not** make any of these faster here. Scripts register `SIGINT`/`SIGTERM` handlers for graceful shutdown.
 
 **File routing**: Failed files go to `./failed/` or `./failed_tv/`. Files needing manual review (multiple video tracks, no acceptable audio) go to `./review/` or `./review_tv/`. Foreign-original sources are **not processed by this pipeline** — the movie batch step routes them to `./failed/` and they are handled by separate scripts / manual work.
 
@@ -132,11 +132,11 @@ python3 maintenance/compare_movie_copies.py \
   --path-b /storage/media/movies --ssh-b david@192.168.36.40 \
   --details > /tmp/compare_output.txt
 
-# 2. Preview what will be added to Radarr
-python3 maintenance/radarr_upgrade_push.py --dry-run
+# 2. Preview what will be added to Radarr (dry-run is the default)
+python3 maintenance/radarr_upgrade_push.py
 
 # 3. Push to Radarr (adds movies + triggers search immediately)
-python3 maintenance/radarr_upgrade_push.py
+python3 maintenance/radarr_upgrade_push.py --run
 ```
 
 #### Radarr API calls used (v3)
