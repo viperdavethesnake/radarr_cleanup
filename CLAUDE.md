@@ -9,7 +9,7 @@ A media library management toolkit for cleaning, enriching, and transcoding MKV 
 Pipeline order:
 1. `batch_cleaner.py` / `tv_batch_cleaner.py` — TMDB metadata, NFO generation, MKV tag injection. English-original films are staged into `./tagged/`. Foreign-original films (TMDB `original_language != 'en'`) are **not handled by this pipeline** — they are moved to `./failed/` and managed by separate scripts / manual processes.
 2. `mkv_remux_cleanroom.py` / `tv_mkv_remux_cleanroom.py` — track selection, chapter/attachment removal. Scans `./tagged/` only and writes to `./cleaned/`. The movie pipeline touches only `movies/` → `tagged/` → `cleaned/` (plus `failed/`/`review/`); it never reads or writes `./foreign/`.
-3. `verify_movies.py` — Jellyfin compatibility validation (movies only)
+3. `verify_movies.py` — Jellyfin compatibility validation (movies only). It is an **English-pipeline gate**: it fails anything with non-English primary audio or surviving chapters. That is intentional — a foreign film that sneaks past the batch stage should flag. Side effect: legitimate foreign_cleanup outputs staged in the shared `cleaned/` dir (which keep chapters and original-language audio by design) will also show FAILED. Those flags are expected noise, not defects — do not "fix" verify to skip them, and never auto-move flagged folders (it would yank the foreign pipeline's staged outputs).
 
 ## Running Scripts
 
