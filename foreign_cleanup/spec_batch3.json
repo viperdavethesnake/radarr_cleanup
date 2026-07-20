@@ -1,0 +1,106 @@
+[
+  {
+    "folder": "Das_Boot_(1981)",
+    "src_folder": "/storage/media/servarr/foreign/Das_Boot_(1981)",
+    "imdb": "tt0082096",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "ger",
+    "audio_default_codec": "A_DTS",
+    "audio_secondary": 2,
+    "audio_secondary_lang": "eng",
+    "audio_secondary_codec": "A_DTS",
+    "subtitles": [
+      {
+        "source_track": 3,
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      }
+    ],
+    "keep_chapters": true
+  },
+  {
+    "folder": "Life_Is_Beautiful_(1997)",
+    "src_folder": "/storage/media/servarr/foreign/Life_Is_Beautiful_(1997)",
+    "imdb": "tt0118799",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "ita",
+    "audio_default_codec": "A_DTS",
+    "audio_secondary": 2,
+    "audio_secondary_lang": "eng",
+    "audio_secondary_codec": "A_AC3",
+    "subtitles": [
+      {
+        "source_track": 3,
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      }
+    ],
+    "keep_chapters": true
+  },
+  {
+    "folder": "Crouching_Tiger,_Hidden_Dragon_(2000)",
+    "src_folder": "/storage/media/servarr/foreign/Crouching_Tiger,_Hidden_Dragon_(2000)",
+    "imdb": "tt0190332",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "chi",
+    "audio_default_codec": "A_AC3",
+    "audio_secondary": 2,
+    "audio_secondary_lang": "eng",
+    "audio_secondary_codec": "A_AC3",
+    "subtitles": [
+      {
+        "source_track": 3,
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      }
+    ],
+    "keep_chapters": false
+  },
+  {
+    "folder": "Cinema_Paradiso_(1988)",
+    "src_folder": "/storage/media/servarr/foreign/Cinema_Paradiso_(1988)",
+    "imdb": "tt0095765",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "ita",
+    "audio_default_codec": "A_DTS",
+    "subtitles": [
+      {
+        "source_track": 2,
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      }
+    ],
+    "keep_chapters": true
+  },
+  {
+    "folder": "The_Leopard_(1963)",
+    "src_folder": "/storage/media/servarr/foreign/The_Leopard_(1963)",
+    "imdb": "tt0057091",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "ita",
+    "audio_default_codec": "A_FLAC",
+    "subtitles": [
+      {
+        "source_track": 2,
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      }
+    ],
+    "keep_chapters": true
+  }
+]

@@ -1,0 +1,97 @@
+[
+  {
+    "folder": "A_Private_Life_(2025)",
+    "src_folder": "/storage/media/servarr/foreign/A_Private_Life_(2025)",
+    "imdb": "tt33852162",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "fre",
+    "audio_default_codec": "A_DTS",
+    "subtitles": [
+      {
+        "file": "/home/david/git/radarr_cleanup/foreign_cleanup/subs/A_Private_Life_(2025).en.srt",
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      }
+    ],
+    "keep_chapters": true
+  },
+  {
+    "folder": "Perfect_Strangers_(2016)",
+    "src_folder": "/storage/media/servarr/foreign/Perfect_Strangers_(2016)",
+    "imdb": "tt4901306",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "ita",
+    "audio_default_codec": "A_DTS",
+    "subtitles": [
+      {
+        "file": "/home/david/git/radarr_cleanup/foreign_cleanup/subs/Perfect_Strangers_(2016).en.srt",
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      }
+    ],
+    "keep_chapters": true
+  },
+  {
+    "folder": "The_Intouchables_(2011)",
+    "src_folder": "/storage/media/servarr/foreign/The_Intouchables_(2011)",
+    "imdb": "tt1675434",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "fre",
+    "audio_default_codec": "A_DTS",
+    "subtitles": [
+      {
+        "file": "/home/david/git/radarr_cleanup/foreign_cleanup/subs/The_Intouchables_(2011).en.srt",
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      }
+    ],
+    "keep_chapters": true
+  },
+  {
+    "folder": "The_Postman_(1994)",
+    "src_folder": "/storage/media/servarr/foreign/The_Postman_(1994)",
+    "imdb": "tt0110877",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "ita",
+    "audio_default_codec": "A_AC3",
+    "subtitles": [
+      {
+        "source_track": 2,
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      }
+    ],
+    "keep_chapters": true
+  },
+  {
+    "folder": "The_Traitor_(2019)",
+    "src_folder": "/storage/media/servarr/foreign/The_Traitor_(2019)",
+    "imdb": "tt7736478",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "ita",
+    "audio_default_codec": "A_DTS",
+    "subtitles": [
+      {
+        "file": "/home/david/git/radarr_cleanup/foreign_cleanup/subs/The_Traitor_(2019).en.srt",
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      }
+    ],
+    "keep_chapters": true
+  }
+]

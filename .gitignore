@@ -104,3 +104,6 @@ cleaned/
 
 # Local scratch / hold folder
 old/
+
+# Foreign pipeline: downloaded/synced subtitle artifacts
+foreign_cleanup/subs/

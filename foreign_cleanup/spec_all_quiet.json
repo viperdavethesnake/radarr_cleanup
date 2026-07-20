@@ -1,0 +1,32 @@
+[
+  {
+    "folder": "All_Quiet_on_the_Western_Front_(2022)",
+    "src_folder": "/storage/media/servarr/foreign/All_Quiet_on_the_Western_Front_(2022)",
+    "output_name": "All_Quiet_on_the_Western_Front_(2022)_[2160p_hevc_truehd].mkv",
+    "imdb": "tt1016150",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "ger",
+    "audio_default_codec": "A_TRUEHD",
+    "audio_secondary": 3,
+    "audio_secondary_lang": "eng",
+    "audio_secondary_codec": "A_DTS",
+    "subtitles": [
+      {
+        "file": "/home/david/git/radarr_cleanup/foreign_cleanup/subs/All_Quiet_on_the_Western_Front_(2022).en.srt",
+        "lang": "eng",
+        "name": "English",
+        "default": true,
+        "forced": false
+      },
+      {
+        "file": "/home/david/git/radarr_cleanup/foreign_cleanup/subs/All_Quiet_on_the_Western_Front_(2022).en.forced.srt",
+        "lang": "eng",
+        "name": "English [Forced]",
+        "default": false,
+        "forced": true
+      }
+    ],
+    "keep_chapters": true
+  }
+]

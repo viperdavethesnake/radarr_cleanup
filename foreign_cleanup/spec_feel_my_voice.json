@@ -1,0 +1,34 @@
+[
+  {
+    "folder": "Feel_My_Voice_(2026)",
+    "src_folder": "/storage/media/servarr/foreign/Feel_My_Voice_(2026)",
+    "output_name": "Feel_My_Voice_(2026)_[2160p_hevc_eac3].mkv",
+    "imdb": "tt38589464",
+    "video": 0,
+    "audio_default": 2,
+    "audio_default_lang": "ita",
+    "audio_default_codec": "A_EAC3",
+    "audio_secondary": 3,
+    "audio_secondary_lang": "eng",
+    "audio_secondary_codec": "A_EAC3",
+    "subtitles": [
+      {
+        "source_track": 9,
+        "lang": "eng",
+        "name": "English",
+        "expect_name": "English",
+        "default": true,
+        "forced": false
+      },
+      {
+        "source_track": 8,
+        "lang": "eng",
+        "name": "English [Forced]",
+        "expect_name": "English [Forced]",
+        "default": false,
+        "forced": true
+      }
+    ],
+    "keep_chapters": true
+  }
+]

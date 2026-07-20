@@ -1,0 +1,53 @@
+[
+  {
+    "folder": "Ip_Man_(2008)",
+    "src_folder": "/storage/media/servarr/foreign/Ip_Man_(2008)",
+    "output_name": "Ip_Man_(2008)_[2160p_hevc_truehd].mkv",
+    "imdb": "tt1220719",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "chi",
+    "audio_default_codec": "A_TRUEHD",
+    "audio_secondary": 3,
+    "audio_secondary_lang": "eng",
+    "audio_secondary_codec": "A_DTS",
+    "subtitle_srt": "/home/david/git/radarr_cleanup/foreign_cleanup/subs/Ip_Man_(2008).en.srt",
+    "sub_lang": "eng",
+    "sub_name": "English",
+    "keep_chapters": true
+  },
+  {
+    "folder": "Ip_Man_2_(2010)",
+    "src_folder": "/storage/media/servarr/foreign/Ip_Man_2_(2010)",
+    "output_name": "Ip_Man_2_(2010)_[2160p_hevc_truehd].mkv",
+    "imdb": "tt1386932",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "chi",
+    "audio_default_codec": "A_TRUEHD",
+    "audio_secondary": 3,
+    "audio_secondary_lang": "eng",
+    "audio_secondary_codec": "A_DTS",
+    "subtitle_srt": "/home/david/git/radarr_cleanup/foreign_cleanup/subs/Ip_Man_2_(2010).en.srt",
+    "sub_lang": "eng",
+    "sub_name": "English",
+    "keep_chapters": true
+  },
+  {
+    "folder": "Ip_Man_3_(2015)",
+    "src_folder": "/storage/media/servarr/foreign/Ip_Man_3_(2015)",
+    "output_name": "Ip_Man_3_(2015)_[2160p_hevc_truehd].mkv",
+    "imdb": "tt2888046",
+    "video": 0,
+    "audio_default": 1,
+    "audio_default_lang": "chi",
+    "audio_default_codec": "A_TRUEHD",
+    "audio_secondary": 3,
+    "audio_secondary_lang": "eng",
+    "audio_secondary_codec": "A_DTS",
+    "subtitle_srt": "/home/david/git/radarr_cleanup/foreign_cleanup/subs/Ip_Man_3_(2015).en.srt",
+    "sub_lang": "eng",
+    "sub_name": "English",
+    "keep_chapters": true
+  }
+]
